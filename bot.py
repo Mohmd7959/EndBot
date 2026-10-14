@@ -43,9 +43,22 @@ def init_db():
         expires_at TEXT
     )""")
     c.execute("CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, account_id INTEGER, phone TEXT, first_name TEXT, username TEXT, session_file TEXT, added_at TEXT, UNIQUE(user_id, account_id))")
-    c.execute("CREATE TABLE IF NOT EXISTS videos(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, file_path TEXT, file_name TEXT, file_size INTEGER, added_at TEXT)")
+    
+    # تعديل جدول الفيديوهات ليصبح مرتبطاً بكل حساب (account_id) على حدة
+    c.execute("""CREATE TABLE IF NOT EXISTS videos(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        user_id INTEGER, 
+        account_id INTEGER, 
+        file_path TEXT, 
+        file_name TEXT, 
+        file_size INTEGER, 
+        added_at TEXT,
+        UNIQUE(user_id, account_id)
+    )""")
+    
     c.execute("CREATE TABLE IF NOT EXISTS chats(user_id INTEGER PRIMARY KEY, chat_id INTEGER, chat_title TEXT, invite_link TEXT, set_at TEXT)")
-    c.execute("CREATE TABLE IF NOT EXISTS active_streams(user_id INTEGER PRIMARY KEY, account_id INTEGER, chat_id INTEGER, chat_title TEXT, video_id INTEGER, started_at TEXT)")
+    c.execute("CREATE TABLE IF NOT EXISTS active_streams(user_id INTEGER, account_id INTEGER, chat_id INTEGER, chat_title TEXT, video_id INTEGER, started_at TEXT, PRIMARY KEY(user_id, account_id))")
+    
     try:
         c.execute("ALTER TABLE chats ADD COLUMN invite_link TEXT")
     except Exception:
@@ -88,7 +101,6 @@ def is_subscriber(uid):
             try:
                 exp_dt = datetime.fromisoformat(exp)
                 if datetime.now() > exp_dt:
-                    # منتهي - احذفه
                     c.execute("DELETE FROM subscribers WHERE user_id=?", (uid,))
                     c.commit()
                     return False
@@ -103,7 +115,6 @@ def add_subscriber(uid, days):
     try:
         now = datetime.now()
         exp = now + timedelta(days=days)
-        # إذا موجود، مدّد
         existing = c.execute("SELECT * FROM subscribers WHERE user_id=?", (uid,)).fetchone()
         if existing and existing["expires_at"]:
             try:
@@ -219,30 +230,28 @@ def remove_all_accounts(uid):
         c.close()
 
 # ============================================================
-# الفيديوهات
+# الفيديوهات (لكل حساب فيديو خاص به)
 # ============================================================
-def add_video(uid, path, name, size):
+def add_video(uid, aid, path, name, size):
     c = db()
     try:
-        cur = c.execute("INSERT INTO videos(user_id, file_path, file_name, file_size, added_at) VALUES(?,?,?,?,?)", (uid, path, name, size, datetime.now().isoformat()))
-        vid = cur.lastrowid
+        c.execute("INSERT OR REPLACE INTO videos(user_id, account_id, file_path, file_name, file_size, added_at) VALUES(?,?,?,?,?,?)", (uid, aid, path, name, size, datetime.now().isoformat()))
         c.commit()
-        return vid
     finally:
         c.close()
 
-def get_video(uid):
+def get_video(uid, aid):
     c = db()
     try:
-        r = c.execute("SELECT * FROM videos WHERE user_id=? ORDER BY id DESC LIMIT 1", (uid,)).fetchone()
+        r = c.execute("SELECT * FROM videos WHERE user_id=? AND account_id=?", (uid, aid)).fetchone()
         return dict(r) if r else None
     finally:
         c.close()
 
-def remove_video(uid):
+def remove_video(uid, aid):
     c = db()
     try:
-        r = c.execute("DELETE FROM videos WHERE user_id=?", (uid,))
+        r = c.execute("DELETE FROM videos WHERE user_id=? AND account_id=?", (uid, aid))
         c.commit()
         return r.rowcount > 0
     finally:
@@ -278,20 +287,28 @@ def set_active_stream(uid, aid, cid, title, vid):
     finally:
         c.close()
 
-def get_active_stream(uid):
+def get_active_stream(uid, aid):
     c = db()
     try:
-        r = c.execute("SELECT * FROM active_streams WHERE user_id=?", (uid,)).fetchone()
+        r = c.execute("SELECT * FROM active_streams WHERE user_id=? AND account_id=?", (uid, aid)).fetchone()
         return dict(r) if r else None
     finally:
         c.close()
 
-def remove_active_stream(uid):
+def remove_active_stream(uid, aid):
     c = db()
     try:
-        r = c.execute("DELETE FROM active_streams WHERE user_id=?", (uid,))
+        r = c.execute("DELETE FROM active_streams WHERE user_id=? AND account_id=?", (uid, aid))
         c.commit()
         return r.rowcount > 0
+    finally:
+        c.close()
+
+def get_all_active_streams_for_user(uid):
+    c = db()
+    try:
+        rows = c.execute("SELECT * FROM active_streams WHERE user_id=?", (uid,)).fetchall()
+        return [dict(r) for r in rows]
     finally:
         c.close()
 
@@ -338,30 +355,29 @@ async def reject_if_not_subscribed(event):
     await respond(event, "لا يمكنك استخدام البوت. أنت ما مشترك!", buttons=btns)
     return True
 
-def delete_video_file(uid):
-    vid = get_video(uid)
+def delete_video_file(uid, aid):
+    vid = get_video(uid, aid)
     if vid and vid.get("file_path") and os.path.exists(vid["file_path"]):
         try:
             os.remove(vid["file_path"])
         except Exception:
             pass
-    remove_video(uid)
+    remove_video(uid, aid)
 
 def main_menu():
     return [
         [Button.inline("اضف حساب", b"add_account", style='success')],
         [Button.inline("فحص حساباتي", b"check_accounts", style='primary')],
         [Button.inline("حذف حساب", b"del_account", style='danger')],
-        [Button.inline("اضف فيديو", b"add_video", style='primary')],
-        [Button.inline("رابط الاتصال", b"set_chat", style='primary')],
-        [Button.inline("بدء البث", b"start_stream", style='success')],
-        [Button.inline("ايقاف", b"stop_stream", style='danger')],
+        [Button.inline("اضف فيديو للحسابات", b"add_video_menu", style='primary')],
+        [Button.inline("رابط الاتصال (المجموعة)", b"set_chat", style='primary')],
+        [Button.inline("قائمة البث والتحكم", b"stream_menu", style='success')],
     ]
 
 def back_button():
     return [[Button.inline("رجوع", b"back_main", style='danger')]]
 
-MAIN_TEXT = "اهلا بك في بوت كام"
+MAIN_TEXT = "اهلا بك في بوت كام - إدارة البث المتعدد"
 
 
 # ============================================================
@@ -385,8 +401,6 @@ async def resolve_chat(uid, link):
             ent = await cli.get_entity(link)
             try:
                 await cli(JoinChannelRequest(ent))
-            except UserAlreadyParticipantError:
-                pass
             except Exception:
                 pass
             return get_peer_id(ent), getattr(ent, 'title', None) or link, None
@@ -406,27 +420,14 @@ async def resolve_chat(uid, link):
                     await cli(ImportChatInviteRequest(code))
                 except UserAlreadyParticipantError:
                     pass
-                except InviteHashExpiredError:
-                    return None, "الرابط منتهي الصلاحية", None
-                except InviteHashInvalidError:
-                    return None, "رابط غير صالح", None
-                except ChannelsTooMuchError:
-                    return None, "الحساب انضم لكثير من المجموعات", None
+                except Exception:
+                    pass
 
                 from telethon.tl.functions.messages import CheckChatInviteRequest
                 info = await cli(CheckChatInviteRequest(code))
                 chat = getattr(info, 'chat', None)
                 if chat:
                     return get_peer_id(chat), getattr(chat, 'title', None) or str(chat.id), link
-
-                await asyncio.sleep(1)
-                try:
-                    async for d in cli.iter_dialogs(limit=30):
-                        if d.is_group or d.is_channel:
-                            return get_peer_id(d.entity), d.title or str(d.entity.id), link
-                except Exception:
-                    pass
-
                 return None, "تم الانضمام لكن تعذر استخراج ID", None
             except Exception as ex:
                 return None, f"تعذر: {type(ex).__name__}", None
@@ -435,8 +436,6 @@ async def resolve_chat(uid, link):
             ent = await cli.get_entity("@" + code)
             try:
                 await cli(JoinChannelRequest(ent))
-            except UserAlreadyParticipantError:
-                pass
             except Exception:
                 pass
             return get_peer_id(ent), getattr(ent, 'title', None) or code, link
@@ -466,8 +465,8 @@ async def auto_leave_when_done(uid, aid, chat_id, duration, video_path):
             os.remove(video_path)
     except Exception:
         pass
-    remove_active_stream(uid)
-    delete_video_file(uid)
+    remove_active_stream(uid, aid)
+    remove_video(uid, aid)
 
 
 # ============================================================
@@ -503,7 +502,7 @@ async def cb_add_account(e):
     n = count_accounts(e.sender_id)
     mx = max_accounts_for(e.sender_id)
     if n >= mx:
-        return await e.answer(f"وصلت للحد ({mx})", alert=True)
+        return await e.answer(f"وصلت للحد الأقصى ({mx})", alert=True)
     btns = [
         [Button.inline("برقم الهاتف", b"acc_phone", style='success')],
         [Button.inline("Session String", b"acc_session", style='primary')],
@@ -525,7 +524,7 @@ async def cb_acc_session(e):
     if not is_subscriber(e.sender_id):
         return await e.answer("غير مصرح", alert=True)
     login_pending[e.sender_id] = {"step": "session"}
-    await edit(e, "ارسل Session String", buttons=back_button())
+    await edit(e, "ارسل Session String الخاص بالحساب", buttons=back_button())
     await e.answer()
 
 # ============================================================
@@ -537,13 +536,15 @@ async def cb_check(e):
         return await e.answer("غير مصرح", alert=True)
     accs = get_accounts(e.sender_id)
     if not accs:
-        return await edit(e, "لا يوجد حسابات", buttons=back_button())
-    txt = "حساباتي:\n\n"
+        return await edit(e, "لا يوجد حسابات مضافة", buttons=back_button())
+    txt = "حساباتك المضافة:\n\n"
     for i, a in enumerate(accs, 1):
         cli = get_state(e.sender_id)["clients"].get(a["account_id"])
-        status = "متصل" if cli and cli.is_connected() else "غير متصل"
+        status = "متصل وعملي" if cli and cli.is_connected() else "غير متصل"
+        vid = get_video(e.sender_id, a["account_id"])
+        vid_status = f"فيديو مرفق ({vid['file_name']})" if vid else "لا يوجد فيديو مرفق"
         uname = f"@{a['username']}" if a['username'] else "-"
-        txt += f"{i}. {mask_phone(a['phone'])}\n   الاسم: {a['first_name'] or '-'}\n   اليوزر: {uname}\n   الحالة: {status}\n\n"
+        txt += f"{i}. {mask_phone(a['phone'])}\n   الاسم: {a['first_name'] or '-'}\n   اليوزر: {uname}\n   الحالة: {status}\n   {vid_status}\n\n"
     await edit(e, txt, buttons=back_button())
     await e.answer()
 
@@ -563,7 +564,7 @@ async def cb_del(e):
         btns.append([Button.inline(lbl, f"del_acc_{a['account_id']}".encode(), style='danger')])
     btns.append([Button.inline("حذف الكل", b"del_all_acc", style='danger')])
     btns.append([Button.inline("رجوع", b"back_main", style='primary')])
-    await edit(e, "اختر الحساب للحذف:", buttons=btns)
+    await edit(e, "اختر الحساب المراد حذفه:", buttons=btns)
     await e.answer()
 
 @bot.on(events.CallbackQuery(pattern=rb"^del_acc_(\d+)$"))
@@ -571,7 +572,8 @@ async def cb_del_one(e):
     if not is_subscriber(e.sender_id):
         return await e.answer("غير مصرح", alert=True)
     aid = int(e.pattern_match.group(1))
-    st = get_state(e.sender_id)
+    uid = e.sender_id
+    st = get_state(uid)
     if aid in st["clients"]:
         try:
             await st["clients"][aid].disconnect()
@@ -579,47 +581,71 @@ async def cb_del_one(e):
             pass
         st["clients"].pop(aid, None)
         st["calls"].pop(aid, None)
-    acc = get_account(e.sender_id, aid)
+    
+    delete_video_file(uid, aid)
+    acc = get_account(uid, aid)
     if acc and acc.get("session_file") and os.path.exists(acc["session_file"]):
         try:
             os.remove(acc["session_file"])
         except Exception:
             pass
-    remove_account(e.sender_id, aid)
-    await edit(e, "تم حذف الحساب", buttons=back_button())
+    remove_account(uid, aid)
+    await edit(e, "تم حذف الحساب وفيديو المرتبط به بنجاح", buttons=back_button())
     await e.answer("تم الحذف")
 
 @bot.on(events.CallbackQuery(data=b"del_all_acc"))
 async def cb_del_all(e):
-    if not is_subscriber(e.sender_id):
+    uid = e.sender_id
+    if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
-    st = get_state(e.sender_id)
+    st = get_state(uid)
     for aid, cli in list(st["clients"].items()):
         try:
             await cli.disconnect()
         except Exception:
             pass
+        delete_video_file(uid, aid)
     st["clients"].clear()
     st["calls"].clear()
-    for a in get_accounts(e.sender_id):
+    for a in get_accounts(uid):
         if a.get("session_file") and os.path.exists(a["session_file"]):
             try:
                 os.remove(a["session_file"])
             except Exception:
                 pass
-    n = remove_all_accounts(e.sender_id)
-    await edit(e, f"تم حذف {n} حساب", buttons=back_button())
+    remove_all_accounts(uid)
+    await edit(e, "تم حذف جميع الحسابات والفيديوهات", buttons=back_button())
     await e.answer("تم")
 
 # ============================================================
-# اضافة فيديو + رابط
+# اضافة فيديو مخصص لكل حساب
 # ============================================================
-@bot.on(events.CallbackQuery(data=b"add_video"))
-async def cb_add_video(e):
+@bot.on(events.CallbackQuery(data=b"add_video_menu"))
+async def cb_add_video_menu(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    accs = get_accounts(uid)
+    if not accs:
+        return await edit(e, "يجب إضافة حسابات أولاً لكي تتمكن من رفع فيديو لكل حساب!", buttons=back_button())
+    
+    btns = []
+    for a in accs:
+        vid = get_video(uid, a["account_id"])
+        has_v = "✅ (مرفق فيديو)" if vid else "❌ (بدون فيديو)"
+        lbl = f"{mask_phone(a['phone'])} {has_v}"
+        btns.append([Button.inline(lbl, f"select_vid_acc_{a['account_id']}".encode(), style='primary')])
+    btns.append([Button.inline("رجوع", b"back_main", style='danger')])
+    await edit(e, "اختر الحساب الذي تريد رفع فيديو خاص به:", buttons=btns)
+    await e.answer()
+
+@bot.on(events.CallbackQuery(pattern=rb"^select_vid_acc_(\d+)$"))
+async def cb_select_vid_acc(e):
     if not is_subscriber(e.sender_id):
         return await e.answer("غير مصرح", alert=True)
-    login_pending[e.sender_id] = {"step": "video"}
-    await edit(e, "ارسل الفيديو (MP4)", buttons=back_button())
+    aid = int(e.pattern_match.group(1))
+    login_pending[e.sender_id] = {"step": "video", "target_account_id": aid}
+    await edit(e, "أرسل الآن الفيديو (MP4) المخصص لهذا الحساب:", buttons=back_button())
     await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"set_chat"))
@@ -627,8 +653,62 @@ async def cb_set_chat(e):
     if not is_subscriber(e.sender_id):
         return await e.answer("غير مصرح", alert=True)
     login_pending[e.sender_id] = {"step": "chat"}
-    await edit(e, "ارسل رابط المجموعة او القناة", buttons=back_button())
+    await edit(e, "ارسل رابط المجموعة او القناة أو الـ ID:", buttons=back_button())
     await e.answer()
+
+# ============================================================
+# قائمة البث والتحكم (التحكم المنفصل أو الجماعي)
+# ============================================================
+@bot.on(events.CallbackQuery(data=b"stream_menu"))
+async def cb_stream_menu(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    accs = get_accounts(uid)
+    if not accs:
+        return await edit(e, "لا توجد حسابات مضافة!", buttons=back_button())
+    
+    ch = get_chat(uid)
+    chat_status = f"المجموعة الحالية: {ch['chat_title']}" if ch else "❌ لم يتم تعيين مجموعة البث بعد!"
+
+    btns = []
+    for a in accs:
+        aid = a["account_id"]
+        active = get_active_stream(uid, aid)
+        status_txt = "🟢 يبث حالياً" if active else "🔴 متوقف"
+        btns.append([Button.inline(f"تحكم بالحساب: {mask_phone(a['phone'])} [{status_txt}]", f"control_acc_{aid}".encode(), style='primary')])
+    
+    btns.append([Button.inline("⚡ تشغيل كل الحسابات معاً", b"start_all_streams", style='success')])
+    btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
+    btns.append([Button.inline("رجوع", b"back_main", style='danger')])
+    
+    await edit(e, f"التحكم في البث:\n{chat_status}\n\nاختر الحساب للتحكم المفرد أو شغل الكل:", buttons=btns)
+    await e.answer()
+
+@bot.on(events.CallbackQuery(pattern=rb"^control_acc_(\d+)$"))
+async def cb_control_acc(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    aid = int(e.pattern_match.group(1))
+    acc = get_account(uid, aid)
+    if not acc:
+        return await e.answer("الحساب غير موجود", alert=True)
+    
+    active = get_active_stream(uid, aid)
+    vid = get_video(uid, aid)
+    
+    status_txt = f"البث الحالي: يبث في ({active['chat_title']})" if active else "الحالة: متوقف"
+    vid_txt = f"الفيديو: {vid['file_name']}" if vid else "⚠️ تنبيه: لم ترفع فيديو لهذا الحساب بعد!"
+
+    btns = [
+        [Button.inline("▶️ بدء البث لهذا الحساب فقط", f"start_one_{aid}".encode(), style='success')],
+        [Button.inline("⏹️ إيقاف البث لهذا الحساب", f"stop_one_{aid}".encode(), style='danger')],
+        [Button.inline("رجوع للقائمة", b"stream_menu", style='primary')]
+    ]
+    await edit(e, f"حساب: {mask_phone(acc['phone'])}\nالاسم: {acc['first_name']}\n{vid_txt}\n{status_txt}", buttons=btns)
+    await e.answer()
+
 
 # ============================================================
 # Message handler
@@ -659,9 +739,7 @@ async def on_message(e):
             lp["client"] = cli
             lp["phone_code_hash"] = res.phone_code_hash
             lp["step"] = "code"
-            await respond(e, "ارسل الكود المرسل اليك")
-        except PhoneNumberInvalidError:
-            await respond(e, "رقم غير صالح")
+            await respond(e, "ارسل الكود المرسل اليك من تيليجرام:")
         except Exception as ex:
             await respond(e, f"خطأ: {type(ex).__name__}")
         return
@@ -673,17 +751,14 @@ async def on_message(e):
         ph = lp.get("phone_code_hash")
         if not cli:
             login_pending.pop(uid, None)
-            return await respond(e, "انتهت الجلسة")
+            return await respond(e, "انتهت الجلسة، اعد المحاولة")
         try:
             await cli.sign_in(phone=phone, code=code, phone_code_hash=ph)
         except SessionPasswordNeededError:
             lp["step"] = "password"
-            return await respond(e, "الحساب محمي بكلمة مرور. ارسلها")
+            return await respond(e, "الحساب محمي بتحقق بخطوتين (كلمة مرور). ارسلها:")
         except PhoneCodeInvalidError:
-            return await respond(e, "الكود خطأ")
-        except PhoneCodeExpiredError:
-            login_pending.pop(uid, None)
-            return await respond(e, "انتهى الكود")
+            return await respond(e, "الكود غير صحيح، أعد إرساله:")
         except Exception as ex:
             return await respond(e, f"خطأ: {type(ex).__name__}")
         await finish_login(e, cli, phone, uid)
@@ -695,10 +770,8 @@ async def on_message(e):
         phone = lp.get("phone")
         try:
             await cli.sign_in(password=pwd)
-        except PasswordHashInvalidError:
-            return await respond(e, "كلمة المرور خطأ")
         except Exception as ex:
-            return await respond(e, f"خطأ: {type(ex).__name__}")
+            return await respond(e, f"كلمة المرور خاطئة أو حدث خطأ: {type(ex).__name__}")
         await finish_login(e, cli, phone, uid)
         return
 
@@ -717,124 +790,50 @@ async def on_message(e):
         return
 
     if step == "video":
+        target_aid = lp.get("target_account_id")
+        if not target_aid:
+            login_pending.pop(uid, None)
+            return await respond(e, "حدث خطأ في تحديد الحساب المستهدف، أعد المحاولة.")
+
         media = e.video or e.document or e.gif
         if not media:
-            return await respond(e, "ارسل فيديو او ملف MP4")
+            return await respond(e, "ارسل فيديو أو ملف صالح (MP4)")
+        
         size = getattr(media, "size", 0) or 0
         if size > 500 * 1024 * 1024:
-            return await respond(e, "الحجم يتجاوز 500MB")
+            return await respond(e, "حجم الفيديو يتجاوز 500MB")
 
-        old = get_video(uid)
+        # حذف الفيديو القديم لهذا الحساب إن وجد
+        old = get_video(uid, target_aid)
         if old and old.get("file_path") and os.path.exists(old["file_path"]):
             try:
                 os.remove(old["file_path"])
             except Exception:
                 pass
-        remove_video(uid)
+        remove_video(uid, target_aid)
 
-        orig_ext = ".mp4"
-        for attr in (getattr(media, "attributes", None) or []):
-            if hasattr(attr, "file_name") and attr.file_name:
-                ext = os.path.splitext(attr.file_name.lower())[1]
-                if ext:
-                    orig_ext = ext
-                break
-        if orig_ext not in (".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".3gp"):
-            mime = getattr(media, "mime_type", "") or ""
-            if "webm" in mime: orig_ext = ".webm"
-            elif "matroska" in mime: orig_ext = ".mkv"
-            elif "quicktime" in mime: orig_ext = ".mov"
-            elif "3gpp" in mime: orig_ext = ".3gp"
-            else: orig_ext = ".mp4"
-
-        temp_path = os.path.join(VIDEOS_DIR, f"temp_{uid}_{media.id}{orig_ext}")
-        final_name = f"{uid}_{media.id}.mp4"
+        temp_path = os.path.join(VIDEOS_DIR, f"temp_{uid}_{target_aid}_{media.id}.mp4")
+        final_name = f"{uid}_{target_aid}.mp4"
         final_path = os.path.join(VIDEOS_DIR, final_name)
 
-        msg = await respond(e, "جاري التحميل...")
+        msg = await respond(e, "جاري تحميل ومعالجة الفيديو لهذا الحساب...")
         try:
             await e.download_media(file=temp_path)
         except Exception as ex:
-            try:
-                await msg.delete()
-            except Exception:
-                pass
+            try: await msg.delete() except: pass
             return await respond(e, f"فشل التحميل: {type(ex).__name__}")
 
-        if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-            try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-            except Exception:
-                pass
-            try:
-                await msg.delete()
-            except Exception:
-                pass
-            return await respond(e, "الملف فارغ")
-
+        # تحويل وضبط الفيديو عبر ffmpeg للتأكد من عمله 100% مع البث
         try:
-            r = subprocess.run(
-                ["ffprobe", "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=codec_type", "-of", "csv=p=0", temp_path],
-                capture_output=True, text=True, timeout=15
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", temp_path,
+                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                 "-c:a", "aac", "-b:a", "128k",
+                 "-movflags", "+faststart", final_path],
+                capture_output=True, text=True, timeout=900
             )
-            if "video" not in r.stdout.lower():
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                return await respond(e, "الملف ليس فيديو")
         except Exception:
-            pass
-
-        try:
-            await msg.edit("جاري التحويل إلى MP4...")
-        except Exception:
-            pass
-
-        converted = False
-        if orig_ext == ".mp4":
-            try:
-                shutil.copy2(temp_path, final_path)
-                if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
-                    converted = True
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        if not converted:
-            try:
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", temp_path,
-                     "-c", "copy", "-movflags", "+faststart", final_path],
-                    capture_output=True, text=True, timeout=300
-                )
-                if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
-                    converted = True
-            except Exception:
-                pass
-
-        if not converted:
-            try:
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", temp_path,
-                     "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                     "-c:a", "aac", "-b:a", "128k",
-                     "-movflags", "+faststart", final_path],
-                    capture_output=True, text=True, timeout=900
-                )
-                if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
-                    converted = True
-            except Exception:
-                pass
+            shutil.copy2(temp_path, final_path)
 
         try:
             if os.path.exists(temp_path):
@@ -842,71 +841,27 @@ async def on_message(e):
         except Exception:
             pass
 
-        if not converted or not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
-            try:
-                await msg.delete()
-            except Exception:
-                pass
-            return await respond(e, "فشل تجهيز الفيديو")
+        if not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
+            try: await msg.delete() except: pass
+            return await respond(e, "فشل معالجة الفيديو")
 
         actual = os.path.getsize(final_path)
-        add_video(uid, final_path, final_name, actual)
+        add_video(uid, target_aid, final_path, final_name, actual)
         login_pending.pop(uid, None)
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        await respond(e, f"تم حفظ الفيديو\nالاسم: {final_name}\nالحجم: {format_size(actual)}", buttons=back_button())
+        try: await msg.delete() except: pass
+        await respond(e, f"تم حفظ الفيديو المخصص لهذا الحساب بنجاح!\nالحجم: {format_size(actual)}", buttons=back_button())
         return
 
     if step == "chat":
         link = (e.text or "").strip()
-        msg = await respond(e, "جاري الانضمام والتحقق...")
+        msg = await respond(e, "جاري التحقق والانضمام للرابط...")
         cid, result, invite_link = await resolve_chat(uid, link)
-        try:
-            await msg.delete()
-        except Exception:
-            pass
+        try: await msg.delete() except: pass
         if cid is None:
             return await respond(e, f"تعذر: {result}", buttons=back_button())
         set_chat(uid, cid, result, invite_link or link)
         login_pending.pop(uid, None)
-        await respond(e, f"تم تعيين: {result}\nID: {cid}", buttons=back_button())
-        return
-
-    # ===== ADMIN INPUT =====
-    if uid != DEV_ID:
-        return
-
-    if step == "adm_add_sub_id":
-        try:
-            tid = int((e.text or "").strip())
-        except Exception:
-            return await respond(e, "ID خطأ", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
-        login_pending[uid] = {"step": "adm_add_sub_days", "target": tid}
-        await respond(e, f"ID: {tid}\nارسل عدد الأيام:", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
-        return
-
-    if step == "adm_add_sub_days":
-        try:
-            days = int((e.text or "").strip())
-            if days < 1: raise ValueError()
-        except Exception:
-            return await respond(e, "عدد أيام خطأ", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
-        tid = lp.get("target")
-        exp = add_subscriber(tid, days)
-        login_pending.pop(uid, None)
-        await respond(e, f"تم اضافة {tid} لمدة {days} يوم\nينتهي: {exp.strftime('%Y-%m-%d')}", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
-        return
-
-    if step == "adm_del_sub_id":
-        try:
-            tid = int((e.text or "").strip())
-        except Exception:
-            return await respond(e, "ID خطأ", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
-        remove_subscriber(tid)
-        login_pending.pop(uid, None)
-        await respond(e, f"تم حذف {tid}", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
+        await respond(e, f"تم تعيين مجموعة البث بنجاح:\n{result}\nID: {cid}", buttons=back_button())
         return
 
 
@@ -924,7 +879,7 @@ async def finish_login_with_client(e, cli, phone, me, uid):
     ok = add_account(uid, aid, phone or "", me.first_name or "", me.username or "", sfile)
     if not ok:
         login_pending.pop(uid, None)
-        return await respond(e, "الحساب مضاف مسبقاً")
+        return await respond(e, "هذا الحساب مضاف مسبقاً!")
     call = PyTgCalls(cli)
     try:
         await call.start()
@@ -934,165 +889,183 @@ async def finish_login_with_client(e, cli, phone, me, uid):
     st["clients"][aid] = cli
     st["calls"][aid] = call
     login_pending.pop(uid, None)
-    await respond(e, f"تم اضافة: {me.first_name} (@{me.username or '-'})", buttons=back_button())
+    await respond(e, f"تم ربط الحساب بنجاح: {me.first_name} (@{me.username or '-'})", buttons=back_button())
 
 
 # ============================================================
-# بدء البث
+# دالة موحدة لبدء البث لحساب معين
 # ============================================================
-@bot.on(events.CallbackQuery(data=b"start_stream"))
-async def cb_start_stream(e):
+async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
+    st = get_state(uid)
+    acc = get_account(uid, aid)
+    if not acc:
+        return False, "الحساب غير موجود"
+    
+    vid = get_video(uid, aid)
+    if not vid or not os.path.exists(vid["file_path"]):
+        return False, f"لا يوجد فيديو مخصص للحساب {mask_phone(acc['phone'])}"
+
+    cli = st["clients"].get(aid)
+    call = st["calls"].get(aid)
+    if not cli or not call:
+        try:
+            with open(acc["session_file"], "r", encoding="utf-8") as f:
+                sstr = f.read().strip()
+            cli = TelegramClient(StringSession(sstr), API_ID, API_HASH)
+            await cli.connect()
+            call = PyTgCalls(cli)
+            await call.start()
+            st["clients"][aid] = cli
+            st["calls"][aid] = call
+        except Exception:
+            return False, f"فشل تشغيل عميل التيليجرام للحساب"
+
+    # التحقق من الانضمام للرابط
+    joined = False
+    try:
+        await cli(GetParticipantRequest(channel=chat_id, participant=aid))
+        joined = True
+    except Exception:
+        joined = False
+
+    if not joined and saved_link:
+        try:
+            if "t.me/+" in saved_link or "joinchat" in saved_link:
+                m = re.search(r't\.me/(?:joinchat/)?\+([A-Za-z0-9_\-]+)', saved_link)
+                if m:
+                    await cli(ImportChatInviteRequest(m.group(1)))
+                    joined = True
+            else:
+                m = re.search(r't\.me/([A-Za-z0-9_]+)', saved_link)
+                if m:
+                    ent = await cli.get_entity("@" + m.group(1))
+                    try:
+                        await cli(JoinChannelRequest(ent))
+                    except UserAlreadyParticipantError:
+                        pass
+                    joined = True
+        except Exception:
+            pass
+
+    if not joined:
+        return False, f"الحساب {mask_phone(acc['phone'])} ليس عضواً في القناة ولم يتمكن من الانضمام"
+
+    try:
+        await call.play(chat_id, MediaStream(vid["file_path"],
+            audio_parameters=AudioQuality.HIGH,
+            video_parameters=VideoQuality.HD_720p),
+            config=GroupCallConfig(auto_start=False))
+        
+        set_active_stream(uid, aid, chat_id, title, vid["id"])
+
+        # حساب مدة الفيديو للإيقاف التلقائي
+        duration = 0
+        try:
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", vid["file_path"]],
+                capture_output=True, text=True, timeout=15
+            )
+            duration = int(float(probe.stdout.strip()))
+        except Exception:
+            duration = 0
+
+        if duration > 0:
+            asyncio.create_task(
+                auto_leave_when_done(uid, aid, chat_id, duration, vid["file_path"])
+            )
+
+        return True, "تم البث بنجاح"
+    except Exception as ex:
+        return False, f"خطأ البث: {type(ex).__name__}"
+
+
+# ============================================================
+# أزرار بدء وإيقاف البث (فردي أو جماعي)
+# ============================================================
+@bot.on(events.CallbackQuery(pattern=rb"^start_one_(\d+)$"))
+async def cb_start_one(e):
     uid = e.sender_id
     if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
-    await e.answer("جاري...")
-
-    accs = get_accounts(uid)
-    if not accs:
-        return await edit(e, "لا يوجد حسابات", buttons=back_button())
-    vid = get_video(uid)
-    if not vid:
-        return await edit(e, "لا يوجد فيديو", buttons=back_button())
+    aid = int(e.pattern_match.group(1))
+    
     ch = get_chat(uid)
     if not ch:
-        return await edit(e, "لا يوجد رابط اتصال", buttons=back_button())
-    if not os.path.exists(vid["file_path"]):
-        return await edit(e, f"الملف مفقود", buttons=back_button())
+        return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
 
-    await edit(e, "جاري بدء البث...")
-    st = get_state(uid)
-    chat_id = ch["chat_id"]
-    title = ch["chat_title"]
-    saved_link = ch.get("invite_link")
-    errors = []
-    done = False
+    await e.answer("جاري تشغيل البث لهذا الحساب...", alert=True)
+    success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
+    if success:
+        await edit(e, f"✅ تم بدء البث بنجاح في القناة: {ch['chat_title']}", buttons=back_button())
+    else:
+        await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
 
-    for acc in accs:
-        aid = acc["account_id"]
-        cli = st["clients"].get(aid)
-        call = st["calls"].get(aid)
-        if not cli or not call:
-            try:
-                with open(acc["session_file"], "r", encoding="utf-8") as f:
-                    sstr = f.read().strip()
-                cli = TelegramClient(StringSession(sstr), API_ID, API_HASH)
-                await cli.connect()
-                call = PyTgCalls(cli)
-                await call.start()
-                st["clients"][aid] = cli
-                st["calls"][aid] = call
-            except Exception as ex:
-                errors.append(f"{acc['first_name']}: ربط فشل")
-                continue
-
-        joined = False
-        try:
-            await cli(GetParticipantRequest(channel=chat_id, participant=aid))
-            joined = True
-        except UserNotParticipantError:
-            joined = False
-        except Exception:
-            joined = False
-
-        if not joined:
-            if saved_link:
-                if "t.me/+" in saved_link or "joinchat" in saved_link:
-                    m = re.search(r't\.me/(?:joinchat/)?\+([A-Za-z0-9_\-]+)', saved_link)
-                    if m:
-                        try:
-                            await cli(ImportChatInviteRequest(m.group(1)))
-                            joined = True
-                        except UserAlreadyParticipantError:
-                            joined = True
-                        except Exception:
-                            errors.append(f"{acc['first_name']}: رابط فشل")
-                            continue
-                else:
-                    m = re.search(r't\.me/([A-Za-z0-9_]+)', saved_link)
-                    if m:
-                        try:
-                            ent = await cli.get_entity("@" + m.group(1))
-                            try:
-                                await cli(JoinChannelRequest(ent))
-                            except UserAlreadyParticipantError:
-                                pass
-                            joined = True
-                        except Exception:
-                            errors.append(f"{acc['first_name']}: فشل الانضمام")
-                            continue
-            else:
-                errors.append(f"{acc['first_name']}: ليس عضو")
-                continue
-
-        try:
-            await call.play(chat_id, MediaStream(vid["file_path"],
-                audio_parameters=AudioQuality.HIGH,
-                video_parameters=VideoQuality.HD_720p),
-                config=GroupCallConfig(auto_start=False))
-            set_active_stream(uid, aid, chat_id, title, vid["id"])
-
-            duration = 0
-            try:
-                probe = subprocess.run(
-                    ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                     "-of", "csv=p=0", vid["file_path"]],
-                    capture_output=True, text=True, timeout=15
-                )
-                duration = int(float(probe.stdout.strip()))
-            except Exception:
-                duration = 0
-
-            old_task = auto_leave_tasks.pop(uid, None)
-            if old_task:
-                old_task.cancel()
-
-            if duration > 0:
-                task = asyncio.create_task(
-                    auto_leave_when_done(uid, aid, chat_id, duration, vid["file_path"])
-                )
-                auto_leave_tasks[uid] = task
-
-            await edit(e, f"تم بدء البث في:\n{title}\n\nالحساب: {acc['first_name']}", buttons=back_button())
-            done = True
-            break
-        except Exception as ex:
-            err = type(ex).__name__
-            if "NoActive" in err or "GroupCallNotFound" in err:
-                errors.append(f"{acc['first_name']}: لا توجد مكالمة")
-            elif "ChatAdminRequired" in err or "ADMIN" in err:
-                errors.append(f"{acc['first_name']}: يحتاج صلاحية")
-            else:
-                errors.append(f"{acc['first_name']}: {err}")
-            continue
-
-    if not done:
-        await edit(e, "فشل البث:\n\n" + "\n".join(errors[:5]), buttons=back_button())
-
-
-# ============================================================
-# ايقاف
-# ============================================================
-@bot.on(events.CallbackQuery(data=b"stop_stream"))
-async def cb_stop(e):
+@bot.on(events.CallbackQuery(pattern=rb"^stop_one_(\d+)$"))
+async def cb_stop_one(e):
     uid = e.sender_id
     if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
-    task = auto_leave_tasks.pop(uid, None)
-    if task:
-        task.cancel()
+    aid = int(e.pattern_match.group(1))
+    
     st = get_state(uid)
-    active = get_active_stream(uid)
-    if active:
-        call = st["calls"].get(active["account_id"])
+    call = st["calls"].get(aid)
+    active = get_active_stream(uid, aid)
+    if call and active:
+        try:
+            await call.leave_call(active["chat_id"])
+        except Exception:
+            pass
+    remove_active_stream(uid, aid)
+    await edit(e, "⏹️ تم إيقاف البث لهذا الحساب.", buttons=back_button())
+    await e.answer("تم الإيقاف")
+
+@bot.on(events.CallbackQuery(data=b"start_all_streams"))
+async def cb_start_all(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    
+    ch = get_chat(uid)
+    if not ch:
+        return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
+    
+    accs = get_accounts(uid)
+    if not accs:
+        return await e.answer("لا توجد حسابات!", alert=True)
+
+    await e.answer("جاري تشغيل كافة الحسابات...", alert=True)
+    results = []
+    for acc in accs:
+        aid = acc["account_id"]
+        success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
+        acc_name = mask_phone(acc['phone'])
+        if success:
+            results.append(f"حساب {acc_name}: 🟢 يعمل بنجاح")
+        else:
+            results.append(f"حساب {acc_name}: ❌ فشل ({msg})")
+
+    await edit(e, "نتائج تشغيل الحسابات:\n\n" + "\n".join(results), buttons=back_button())
+
+@bot.on(events.CallbackQuery(data=b"stop_all_streams"))
+async def cb_stop_all(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    
+    st = get_state(uid)
+    for active in get_all_active_streams_for_user(uid):
+        aid = active["account_id"]
+        call = st["calls"].get(aid)
         if call:
             try:
                 await call.leave_call(active["chat_id"])
             except Exception:
                 pass
-    remove_active_stream(uid)
-    delete_video_file(uid)
-    await edit(e, "تم الايقاف وحذف الفيديو", buttons=back_button())
-    await e.answer("تم")
+        remove_active_stream(uid, aid)
+
+    await edit(e, "🛑 تم إيقاف جميع البثوث النشطة لكافة حساباتك.", buttons=back_button())
+    await e.answer("تم الإيقاف الجماعي")
 
 
 # ============================================================
@@ -1127,13 +1100,10 @@ async def cb_stats(e):
         act = c.execute("SELECT COUNT(*) FROM active_streams").fetchone()[0]
     finally:
         c.close()
-    txt = f"الاحصائيات\n\nالمستخدمون: {u}\nالحسابات: {a}\nالمشتركون: {s}\nالفيديوهات: {v}\nالاتصالات: {act}"
+    txt = f"الاحصائيات العامة:\n\nالمستخدمون: {u}\nالحسابات: {a}\nالمشتركون: {s}\nالفيديوهات: {v}\nالاتصالات النشطة: {act}"
     await edit(e, txt, buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
     await e.answer()
 
-# ============================================================
-# عرض المشتركين - أيام متبقية + اسم + ID
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"adm_list_subs"))
 async def cb_list_subs(e):
     if e.sender_id != DEV_ID:
@@ -1146,26 +1116,19 @@ async def cb_list_subs(e):
         uid = s["user_id"]
         u = get_user(uid)
         name = u["first_name"] if u else "غير معروف"
-        uname = f"@{u['username']}" if u and u.get("username") else "-"
         days = days_left(uid)
-        txt += f"الاسم: {name}\nاليوزر: {uname}\nID: {uid}\nمتبقي: {days} يوم\n\n"
+        txt += f"الاسم: {name}\nID: {uid}\nمتبقي: {days} يوم\n\n"
     await edit(e, txt[:4000], buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
     await e.answer()
 
-# ============================================================
-# اضف مشترك
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"adm_add_sub"))
 async def cb_addsub(e):
     if e.sender_id != DEV_ID:
         return await e.answer("غير مصرح", alert=True)
     login_pending[e.sender_id] = {"step": "adm_add_sub_id"}
-    await edit(e, "ارسل ID المستخدم", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
+    await edit(e, "ارسل ID المستخدم:", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
     await e.answer()
 
-# ============================================================
-# حذف مشترك - أزرار
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"adm_del_sub"))
 async def cb_delsub(e):
     if e.sender_id != DEV_ID:
@@ -1181,7 +1144,6 @@ async def cb_delsub(e):
         days = days_left(uid)
         lbl = f"{name} ({uid}) - {days}ي"
         btns.append([Button.inline(lbl, f"adm_del_sub_{uid}".encode(), style='danger')])
-    btns.append([Button.inline("حذف الكل", b"adm_del_all_subs", style='danger')])
     btns.append([Button.inline("رجوع", b"adm_back", style='primary')])
     await edit(e, "اختر مشترك للحذف:", buttons=btns)
     await e.answer()
@@ -1189,23 +1151,12 @@ async def cb_delsub(e):
 @bot.on(events.CallbackQuery(pattern=rb"^adm_del_sub_(\d+)$"))
 async def cb_delsub_one(e):
     if e.sender_id != DEV_ID:
-        return await e.answer("غير مصرح", alert=True)
+        return
     tid = int(e.pattern_match.group(1))
     remove_subscriber(tid)
-    await edit(e, f"تم حذف {tid}", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
+    await edit(e, f"تم حذف المشترك {tid}", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
     await e.answer("تم")
 
-@bot.on(events.CallbackQuery(data=b"adm_del_all_subs"))
-async def cb_delallsubs(e):
-    if e.sender_id != DEV_ID:
-        return await e.answer("غير مصرح", alert=True)
-    n = remove_all_subscribers()
-    await edit(e, f"تم حذف {n} مشترك", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
-    await e.answer("تم")
-
-# ============================================================
-# الاتصالات الجارية
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"adm_active"))
 async def cb_act(e):
     if e.sender_id != DEV_ID:
@@ -1213,9 +1164,9 @@ async def cb_act(e):
     streams = get_all_active_streams()
     txt = "الاتصالات النشطة:\n\n"
     for s in streams:
-        txt += f"المستخدم: {s['user_id']}\nالغرفة: {s['chat_title']}\n\n"
+        txt += f"المستخدم: {s['user_id']} | الحساب: {s['account_id']}\nالقناة: {s['chat_title']}\n\n"
     if not streams:
-        txt = "لا يوجد"
+        txt = "لا توجد أي اتصالات نشطة حالياً."
     await edit(e, txt[:4000], buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
     await e.answer()
 
@@ -1233,13 +1184,9 @@ async def cb_stopall(e):
                 count += 1
             except Exception:
                 pass
-        task = auto_leave_tasks.pop(s["user_id"], None)
-        if task:
-            task.cancel()
-        remove_active_stream(s["user_id"])
-        delete_video_file(s["user_id"])
-    await edit(e, f"تم ايقاف {count} اتصال", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
-    await e.answer("تم")
+        remove_active_stream(s["user_id"], s["account_id"])
+    await edit(e, f"تم إيقاف عدد {count} اتصال نشط عام.", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
+    await e.answer("تم الإيقاف")
 
 @bot.on(events.CallbackQuery(data=b"adm_back"))
 async def cb_adm_back(e):
