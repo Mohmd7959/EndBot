@@ -44,7 +44,6 @@ def init_db():
     )""")
     c.execute("CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, account_id INTEGER, phone TEXT, first_name TEXT, username TEXT, session_file TEXT, added_at TEXT, UNIQUE(user_id, account_id))")
     
-    # تعديل جدول الفيديوهات ليصبح مرتبطاً بكل حساب (account_id) على حدة
     c.execute("""CREATE TABLE IF NOT EXISTS videos(
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
         user_id INTEGER, 
@@ -87,9 +86,6 @@ def get_user(uid):
     finally:
         c.close()
 
-# ============================================================
-# المشتركون
-# ============================================================
 def is_subscriber(uid):
     if uid == DEV_ID: return True
     c = db()
@@ -138,15 +134,6 @@ def remove_subscriber(uid):
     finally:
         c.close()
 
-def remove_all_subscribers():
-    c = db()
-    try:
-        r = c.execute("DELETE FROM subscribers")
-        c.commit()
-        return r.rowcount
-    finally:
-        c.close()
-
 def list_subscribers():
     c = db()
     try:
@@ -170,9 +157,6 @@ def days_left(uid):
     finally:
         c.close()
 
-# ============================================================
-# الحسابات
-# ============================================================
 def count_accounts(uid):
     c = db()
     try:
@@ -229,9 +213,6 @@ def remove_all_accounts(uid):
     finally:
         c.close()
 
-# ============================================================
-# الفيديوهات (لكل حساب فيديو خاص به)
-# ============================================================
 def add_video(uid, aid, path, name, size):
     c = db()
     try:
@@ -257,9 +238,6 @@ def remove_video(uid, aid):
     finally:
         c.close()
 
-# ============================================================
-# المحادثات
-# ============================================================
 def set_chat(uid, cid, title, invite_link=None):
     c = db()
     try:
@@ -276,9 +254,6 @@ def get_chat(uid):
     finally:
         c.close()
 
-# ============================================================
-# البث النشط
-# ============================================================
 def set_active_stream(uid, aid, cid, title, vid):
     c = db()
     try:
@@ -320,9 +295,6 @@ def get_all_active_streams():
     finally:
         c.close()
 
-# ============================================================
-# أدوات
-# ============================================================
 def mask_phone(p):
     if not p: return "unknown"
     p = str(p)
@@ -379,10 +351,6 @@ def back_button():
 
 MAIN_TEXT = "اهلا بك في بوت كام - إدارة البث المتعدد"
 
-
-# ============================================================
-# resolve_chat
-# ============================================================
 async def resolve_chat(uid, link):
     link = link.strip()
     st = get_state(uid)
@@ -444,10 +412,6 @@ async def resolve_chat(uid, link):
 
     return None, "صيغة غير معروفة", None
 
-
-# ============================================================
-# auto_leave_when_done
-# ============================================================
 async def auto_leave_when_done(uid, aid, chat_id, duration, video_path):
     try:
         await asyncio.sleep(duration + 3)
@@ -468,10 +432,6 @@ async def auto_leave_when_done(uid, aid, chat_id, duration, video_path):
     remove_active_stream(uid, aid)
     remove_video(uid, aid)
 
-
-# ============================================================
-# /start
-# ============================================================
 @bot.on(events.NewMessage(pattern=r"^/start$"))
 async def cmd_start(e):
     if not e.is_private:
@@ -492,9 +452,6 @@ async def cb_back(e):
         pass
     await e.answer()
 
-# ============================================================
-# اضافة حساب
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"add_account"))
 async def cb_add_account(e):
     if not is_subscriber(e.sender_id):
@@ -527,9 +484,6 @@ async def cb_acc_session(e):
     await edit(e, "ارسل Session String الخاص بالحساب", buttons=back_button())
     await e.answer()
 
-# ============================================================
-# فحص حساباتي
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"check_accounts"))
 async def cb_check(e):
     if not is_subscriber(e.sender_id):
@@ -548,9 +502,6 @@ async def cb_check(e):
     await edit(e, txt, buttons=back_button())
     await e.answer()
 
-# ============================================================
-# حذف حساب
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"del_account"))
 async def cb_del(e):
     if not is_subscriber(e.sender_id):
@@ -617,9 +568,6 @@ async def cb_del_all(e):
     await edit(e, "تم حذف جميع الحسابات والفيديوهات", buttons=back_button())
     await e.answer("تم")
 
-# ============================================================
-# اضافة فيديو مخصص لكل حساب
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"add_video_menu"))
 async def cb_add_video_menu(e):
     uid = e.sender_id
@@ -656,9 +604,6 @@ async def cb_set_chat(e):
     await edit(e, "ارسل رابط المجموعة او القناة أو الـ ID:", buttons=back_button())
     await e.answer()
 
-# ============================================================
-# قائمة البث والتحكم (التحكم المنفصل أو الجماعي)
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"stream_menu"))
 async def cb_stream_menu(e):
     uid = e.sender_id
@@ -709,10 +654,6 @@ async def cb_control_acc(e):
     await edit(e, f"حساب: {mask_phone(acc['phone'])}\nالاسم: {acc['first_name']}\n{vid_txt}\n{status_txt}", buttons=btns)
     await e.answer()
 
-
-# ============================================================
-# Message handler
-# ============================================================
 @bot.on(events.NewMessage())
 async def on_message(e):
     if not e.is_private or e.out:
@@ -803,7 +744,6 @@ async def on_message(e):
         if size > 500 * 1024 * 1024:
             return await respond(e, "حجم الفيديو يتجاوز 500MB")
 
-        # حذف الفيديو القديم لهذا الحساب إن وجد
         old = get_video(uid, target_aid)
         if old and old.get("file_path") and os.path.exists(old["file_path"]):
             try:
@@ -820,10 +760,12 @@ async def on_message(e):
         try:
             await e.download_media(file=temp_path)
         except Exception as ex:
-            try: await msg.delete() except: pass
+            try:
+                await msg.delete()
+            except Exception:
+                pass
             return await respond(e, f"فشل التحميل: {type(ex).__name__}")
 
-        # تحويل وضبط الفيديو عبر ffmpeg للتأكد من عمله 100% مع البث
         try:
             subprocess.run(
                 ["ffmpeg", "-y", "-i", temp_path,
@@ -842,13 +784,19 @@ async def on_message(e):
             pass
 
         if not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
-            try: await msg.delete() except: pass
+            try:
+                await msg.delete()
+            except Exception:
+                pass
             return await respond(e, "فشل معالجة الفيديو")
 
         actual = os.path.getsize(final_path)
         add_video(uid, target_aid, final_path, final_name, actual)
         login_pending.pop(uid, None)
-        try: await msg.delete() except: pass
+        try:
+            await msg.delete()
+        except Exception:
+            pass
         await respond(e, f"تم حفظ الفيديو المخصص لهذا الحساب بنجاح!\nالحجم: {format_size(actual)}", buttons=back_button())
         return
 
@@ -856,7 +804,10 @@ async def on_message(e):
         link = (e.text or "").strip()
         msg = await respond(e, "جاري التحقق والانضمام للرابط...")
         cid, result, invite_link = await resolve_chat(uid, link)
-        try: await msg.delete() except: pass
+        try:
+            await msg.delete()
+        except Exception:
+            pass
         if cid is None:
             return await respond(e, f"تعذر: {result}", buttons=back_button())
         set_chat(uid, cid, result, invite_link or link)
@@ -864,11 +815,29 @@ async def on_message(e):
         await respond(e, f"تم تعيين مجموعة البث بنجاح:\n{result}\nID: {cid}", buttons=back_button())
         return
 
+    if step == "adm_add_sub_id":
+        try:
+            tid = int(e.text.strip())
+            login_pending[e.sender_id] = {"step": "adm_add_sub_days", "target_uid": tid}
+            await respond(e, "ارسل عدد الأيام للمشترك:")
+        except ValueError:
+            await respond(e, "ID غير صالح، ارسل أرقاماً فقط:")
+        return
+
+    if step == "adm_add_sub_days":
+        try:
+            days = int(e.text.strip())
+            tid = lp.get("target_uid")
+            exp = add_subscriber(tid, days)
+            login_pending.pop(e.sender_id, None)
+            await respond(e, f"تمت إضافة المشترك بنجاح!\nينتهي في: {exp.strftime('%Y-%m-%d')}")
+        except ValueError:
+            await respond(e, "أدخل عدد أيام صالح:")
+        return
 
 async def finish_login(e, cli, phone, uid):
     me = await cli.get_me()
     await finish_login_with_client(e, cli, phone, me, uid)
-
 
 async def finish_login_with_client(e, cli, phone, me, uid):
     aid = me.id
@@ -891,10 +860,6 @@ async def finish_login_with_client(e, cli, phone, me, uid):
     login_pending.pop(uid, None)
     await respond(e, f"تم ربط الحساب بنجاح: {me.first_name} (@{me.username or '-'})", buttons=back_button())
 
-
-# ============================================================
-# دالة موحدة لبدء البث لحساب معين
-# ============================================================
 async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
     st = get_state(uid)
     acc = get_account(uid, aid)
@@ -918,9 +883,8 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
             st["clients"][aid] = cli
             st["calls"][aid] = call
         except Exception:
-            return False, f"فشل تشغيل عميل التيليجرام للحساب"
+            return False, "فشل تشغيل عميل التيليجرام للحساب"
 
-    # التحقق من الانضمام للرابط
     joined = False
     try:
         await cli(GetParticipantRequest(channel=chat_id, participant=aid))
@@ -958,7 +922,6 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
         
         set_active_stream(uid, aid, chat_id, title, vid["id"])
 
-        # حساب مدة الفيديو للإيقاف التلقائي
         duration = 0
         try:
             probe = subprocess.run(
@@ -979,10 +942,6 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
     except Exception as ex:
         return False, f"خطأ البث: {type(ex).__name__}"
 
-
-# ============================================================
-# أزرار بدء وإيقاف البث (فردي أو جماعي)
-# ============================================================
 @bot.on(events.CallbackQuery(pattern=rb"^start_one_(\d+)$"))
 async def cb_start_one(e):
     uid = e.sender_id
@@ -1067,10 +1026,6 @@ async def cb_stop_all(e):
     await edit(e, "🛑 تم إيقاف جميع البثوث النشطة لكافة حساباتك.", buttons=back_button())
     await e.answer("تم الإيقاف الجماعي")
 
-
-# ============================================================
-# /admin
-# ============================================================
 def admin_menu():
     return [
         [Button.inline("الاحصائيات", b"adm_stats", style='primary')],
@@ -1195,10 +1150,6 @@ async def cb_adm_back(e):
     await edit(e, "لوحة المطور", buttons=admin_menu())
     await e.answer()
 
-
-# ============================================================
-# Main
-# ============================================================
 async def main():
     init_db()
     await bot.start(bot_token=BOT_TOKEN)
