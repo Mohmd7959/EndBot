@@ -12,7 +12,7 @@ from telethon.errors import (MessageNotModifiedError, UserNotParticipantError,
     FloodWaitError, ChannelsTooMuchError, PhoneNumberInvalidError)
 from telethon.utils import get_peer_id
 from pytgcalls import PyTgCalls, idle
-from pytgcalls.types import MediaStream, GroupCallConfig
+from pytgcalls.types import MediaStream, GroupCallConfig, AudioQuality, VideoQuality
 from config import *
 
 bot = TelegramClient("bot_session", API_ID, API_HASH)
@@ -74,9 +74,6 @@ def get_user(uid):
     finally:
         c.close()
 
-# ============================================================
-# المشتركون
-# ============================================================
 def is_subscriber(uid):
     if uid == DEV_ID: return True
     c = db()
@@ -157,9 +154,6 @@ def days_left(uid):
     finally:
         c.close()
 
-# ============================================================
-# الحسابات
-# ============================================================
 def count_accounts(uid):
     c = db()
     try:
@@ -216,9 +210,6 @@ def remove_all_accounts(uid):
     finally:
         c.close()
 
-# ============================================================
-# الفيديوهات
-# ============================================================
 def add_video(uid, path, name, size):
     c = db()
     try:
@@ -246,9 +237,6 @@ def remove_video(uid):
     finally:
         c.close()
 
-# ============================================================
-# المحادثات
-# ============================================================
 def set_chat(uid, cid, title, invite_link=None):
     c = db()
     try:
@@ -265,9 +253,6 @@ def get_chat(uid):
     finally:
         c.close()
 
-# ============================================================
-# البث النشط
-# ============================================================
 def set_active_stream(uid, aid, cid, title, vid):
     c = db()
     try:
@@ -301,9 +286,6 @@ def get_all_active_streams():
     finally:
         c.close()
 
-# ============================================================
-# أدوات
-# ============================================================
 def mask_phone(p):
     if not p: return "unknown"
     p = str(p)
@@ -361,10 +343,6 @@ def back_button():
 
 MAIN_TEXT = "اهلا بك في بوت كام"
 
-
-# ============================================================
-# resolve_chat
-# ============================================================
 async def resolve_chat(uid, link):
     link = link.strip()
     st = get_state(uid)
@@ -443,10 +421,6 @@ async def resolve_chat(uid, link):
 
     return None, "صيغة غير معروفة", None
 
-
-# ============================================================
-# auto_leave_when_done
-# ============================================================
 async def auto_leave_when_done(uid, aid, chat_id, duration, video_path):
     try:
         await asyncio.sleep(duration + 3)
@@ -467,10 +441,6 @@ async def auto_leave_when_done(uid, aid, chat_id, duration, video_path):
     remove_active_stream(uid)
     delete_video_file(uid)
 
-
-# ============================================================
-# /start
-# ============================================================
 @bot.on(events.NewMessage(pattern=r"^/start$"))
 async def cmd_start(e):
     if not e.is_private:
@@ -491,9 +461,6 @@ async def cb_back(e):
         pass
     await e.answer()
 
-# ============================================================
-# اضافة حساب
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"add_account"))
 async def cb_add_account(e):
     if not is_subscriber(e.sender_id):
@@ -526,9 +493,6 @@ async def cb_acc_session(e):
     await edit(e, "ارسل Session String", buttons=back_button())
     await e.answer()
 
-# ============================================================
-# فحص حساباتي
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"check_accounts"))
 async def cb_check(e):
     if not is_subscriber(e.sender_id):
@@ -545,9 +509,6 @@ async def cb_check(e):
     await edit(e, txt, buttons=back_button())
     await e.answer()
 
-# ============================================================
-# حذف حساب
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"del_account"))
 async def cb_del(e):
     if not is_subscriber(e.sender_id):
@@ -609,9 +570,6 @@ async def cb_del_all(e):
     await edit(e, f"تم حذف {n} حساب", buttons=back_button())
     await e.answer("تم")
 
-# ============================================================
-# اضافة فيديو + رابط
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"add_video"))
 async def cb_add_video(e):
     if not is_subscriber(e.sender_id):
@@ -628,9 +586,6 @@ async def cb_set_chat(e):
     await edit(e, "ارسل رابط المجموعة او القناة", buttons=back_button())
     await e.answer()
 
-# ============================================================
-# Message handler
-# ============================================================
 @bot.on(events.NewMessage())
 async def on_message(e):
     if not e.is_private or e.out:
@@ -780,7 +735,6 @@ async def on_message(e):
         await respond(e, f"تم تعيين: {result}\nID: {cid}", buttons=back_button())
         return
 
-    # ===== ADMIN INPUT =====
     if uid != DEV_ID:
         return
 
@@ -815,11 +769,9 @@ async def on_message(e):
         await respond(e, f"تم حذف {tid}", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
         return
 
-
 async def finish_login(e, cli, phone, uid):
     me = await cli.get_me()
     await finish_login_with_client(e, cli, phone, me, uid)
-
 
 async def finish_login_with_client(e, cli, phone, me, uid):
     aid = me.id
@@ -842,10 +794,6 @@ async def finish_login_with_client(e, cli, phone, me, uid):
     login_pending.pop(uid, None)
     await respond(e, f"تم اضافة: {me.first_name} (@{me.username or '-'})", buttons=back_button())
 
-
-# ============================================================
-# بدء البث (النسخة المعدلة والآمنة لتجاوز أخطاء FFmpeg)
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"start_stream"))
 async def cb_start_stream(e):
     uid = e.sender_id
@@ -934,6 +882,7 @@ async def cb_start_stream(e):
 
         try:
             abs_path = os.path.abspath(file_path)
+            # استبدال الإعدادات القديمة بطريقة مباشرة وآمنة لعدم تفعيل خطأ الـ FFmpegError
             await call.play(
                 chat_id,
                 MediaStream(abs_path)
@@ -972,10 +921,6 @@ async def cb_start_stream(e):
     if not done:
         await edit(e, "فشل البث:\n\n" + "\n".join(errors[:5]), buttons=back_button())
 
-
-# ============================================================
-# ايقاف
-# ============================================================
 @bot.on(events.CallbackQuery(data=b"stop_stream"))
 async def cb_stop(e):
     uid = e.sender_id
@@ -998,10 +943,6 @@ async def cb_stop(e):
     await edit(e, "تم الايقاف وحذف الفيديو", buttons=back_button())
     await e.answer("تم")
 
-
-# ============================================================
-# /admin
-# ============================================================
 def admin_menu():
     return [
         [Button.inline("الاحصائيات", b"adm_stats", style='primary')],
