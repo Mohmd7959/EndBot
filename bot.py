@@ -12,7 +12,7 @@ from telethon.errors import (MessageNotModifiedError, UserNotParticipantError,
     FloodWaitError, ChannelsTooMuchError, PhoneNumberInvalidError)
 from telethon.utils import get_peer_id
 from pytgcalls import PyTgCalls, idle
-from pytgcalls.types import MediaStream, AudioQuality, VideoQuality
+from pytgcalls.types import MediaStream, GroupCallConfig, AudioQuality, VideoQuality
 from config import *
 
 bot = TelegramClient("bot_session", API_ID, API_HASH)
@@ -74,6 +74,9 @@ def get_user(uid):
     finally:
         c.close()
 
+# ============================================================
+# المشتركون
+# ============================================================
 def is_subscriber(uid):
     if uid == DEV_ID: return True
     c = db()
@@ -154,6 +157,9 @@ def days_left(uid):
     finally:
         c.close()
 
+# ============================================================
+# الحسابات
+# ============================================================
 def count_accounts(uid):
     c = db()
     try:
@@ -210,6 +216,9 @@ def remove_all_accounts(uid):
     finally:
         c.close()
 
+# ============================================================
+# الفيديوهات
+# ============================================================
 def add_video(uid, path, name, size):
     c = db()
     try:
@@ -237,6 +246,9 @@ def remove_video(uid):
     finally:
         c.close()
 
+# ============================================================
+# المحادثات
+# ============================================================
 def set_chat(uid, cid, title, invite_link=None):
     c = db()
     try:
@@ -253,6 +265,9 @@ def get_chat(uid):
     finally:
         c.close()
 
+# ============================================================
+# البث النشط
+# ============================================================
 def set_active_stream(uid, aid, cid, title, vid):
     c = db()
     try:
@@ -286,6 +301,9 @@ def get_all_active_streams():
     finally:
         c.close()
 
+# ============================================================
+# أدوات
+# ============================================================
 def mask_phone(p):
     if not p: return "unknown"
     p = str(p)
@@ -315,7 +333,7 @@ async def reject_if_not_subscribed(event):
     if is_subscriber(event.sender_id):
         return False
     btns = [[Button.url("المطور", DEV_LINK, style='primary')]]
-    await respond(event, "لا يمكنك استخدام البوت. أنت ما مشترك!", buttons=btns)
+    await respond(event, "لا يمكنك استخدام البوت. أنت غير مشترك!", buttons=btns)
     return True
 
 def delete_video_file(uid):
@@ -341,8 +359,11 @@ def main_menu():
 def back_button():
     return [[Button.inline("رجوع", b"back_main", style='danger')]]
 
-MAIN_TEXT = "اهلا بك في بوت كام"
+MAIN_TEXT = "اهلا بك في بوت البث والمكالمات"
 
+# ============================================================
+# resolve_chat
+# ============================================================
 async def resolve_chat(uid, link):
     link = link.strip()
     st = get_state(uid)
@@ -421,6 +442,9 @@ async def resolve_chat(uid, link):
 
     return None, "صيغة غير معروفة", None
 
+# ============================================================
+# auto_leave_when_done
+# ============================================================
 async def auto_leave_when_done(uid, aid, chat_id, duration, video_path):
     try:
         await asyncio.sleep(duration + 3)
@@ -433,9 +457,17 @@ async def auto_leave_when_done(uid, aid, chat_id, duration, video_path):
             await call.leave_call(chat_id)
         except Exception:
             pass
-    # إزالة البث النشط فقط دون حذف سجل الفيديو نهائياً لكي لا تظهر مشكلة "أضف فيديو أولاً" فور انتهاء العرض
+    try:
+        if video_path and os.path.exists(video_path):
+            os.remove(video_path)
+    except Exception:
+        pass
     remove_active_stream(uid)
+    delete_video_file(uid)
 
+# ============================================================
+# /start
+# ============================================================
 @bot.on(events.NewMessage(pattern=r"^/start$"))
 async def cmd_start(e):
     if not e.is_private:
@@ -456,6 +488,9 @@ async def cb_back(e):
         pass
     await e.answer()
 
+# ============================================================
+# اضافة حساب
+# ============================================================
 @bot.on(events.CallbackQuery(data=b"add_account"))
 async def cb_add_account(e):
     if not is_subscriber(e.sender_id):
@@ -488,6 +523,9 @@ async def cb_acc_session(e):
     await edit(e, "ارسل Session String", buttons=back_button())
     await e.answer()
 
+# ============================================================
+# فحص حساباتي
+# ============================================================
 @bot.on(events.CallbackQuery(data=b"check_accounts"))
 async def cb_check(e):
     if not is_subscriber(e.sender_id):
@@ -504,6 +542,9 @@ async def cb_check(e):
     await edit(e, txt, buttons=back_button())
     await e.answer()
 
+# ============================================================
+# حذف حساب
+# ============================================================
 @bot.on(events.CallbackQuery(data=b"del_account"))
 async def cb_del(e):
     if not is_subscriber(e.sender_id):
@@ -565,6 +606,9 @@ async def cb_del_all(e):
     await edit(e, f"تم حذف {n} حساب", buttons=back_button())
     await e.answer("تم")
 
+# ============================================================
+# اضافة فيديو + رابط
+# ============================================================
 @bot.on(events.CallbackQuery(data=b"add_video"))
 async def cb_add_video(e):
     if not is_subscriber(e.sender_id):
@@ -581,6 +625,9 @@ async def cb_set_chat(e):
     await edit(e, "ارسل رابط المجموعة او القناة", buttons=back_button())
     await e.answer()
 
+# ============================================================
+# Message handler
+# ============================================================
 @bot.on(events.NewMessage())
 async def on_message(e):
     if not e.is_private or e.out:
@@ -680,22 +727,7 @@ async def on_message(e):
                 pass
         remove_video(uid)
 
-        orig_ext = ".mp4"
-        for attr in (getattr(media, "attributes", None) or []):
-            if hasattr(attr, "file_name") and attr.file_name:
-                ext = os.path.splitext(attr.file_name.lower())[1]
-                if ext:
-                    orig_ext = ext
-                break
-        if orig_ext not in (".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".3gp"):
-            mime = getattr(media, "mime_type", "") or ""
-            if "webm" in mime: orig_ext = ".webm"
-            elif "matroska" in mime: orig_ext = ".mkv"
-            elif "quicktime" in mime: orig_ext = ".mov"
-            elif "3gpp" in mime: orig_ext = ".3gp"
-            else: orig_ext = ".mp4"
-
-        temp_path = os.path.join(VIDEOS_DIR, f"temp_{uid}_{media.id}{orig_ext}")
+        temp_path = os.path.join(VIDEOS_DIR, f"temp_{uid}_{media.id}.tmp")
         final_name = f"{uid}_{media.id}.mp4"
         final_path = os.path.join(VIDEOS_DIR, final_name)
 
@@ -711,8 +743,7 @@ async def on_message(e):
 
         if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
             try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                if os.path.exists(temp_path): os.remove(temp_path)
             except Exception:
                 pass
             try:
@@ -722,67 +753,26 @@ async def on_message(e):
             return await respond(e, "الملف فارغ")
 
         try:
-            r = subprocess.run(
-                ["ffprobe", "-v", "error", "-select_streams", "v:0",
-                 "-show_entries", "stream=codec_type", "-of", "csv=p=0", temp_path],
-                capture_output=True, text=True, timeout=15
-            )
-            if "video" not in r.stdout.lower():
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
-                try:
-                    await msg.delete()
-                except Exception:
-                    pass
-                return await respond(e, "الملف ليس فيديو")
+            await msg.edit("جاري معالجة وتهيئة الفيديو للبث...")
         except Exception:
             pass
 
-        try:
-            await msg.edit("جاري التحويل إلى MP4...")
-        except Exception:
-            pass
-
+        # تحويل الفيديو لترميز H.264 وصوت AAC متوافق بنسبة 100% مع PyTgCalls وFFmpeg
         converted = False
-        if orig_ext == ".mp4":
-            try:
-                shutil.copy2(temp_path, final_path)
-                if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
-                    converted = True
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-
-        if not converted:
-            try:
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", temp_path,
-                     "-c", "copy", "-movflags", "+faststart", final_path],
-                    capture_output=True, text=True, timeout=300
-                )
-                if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
-                    converted = True
-            except Exception:
-                pass
-
-        if not converted:
-            try:
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", temp_path,
-                     "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                     "-c:a", "aac", "-b:a", "128k",
-                     "-movflags", "+faststart", final_path],
-                    capture_output=True, text=True, timeout=900
-                )
-                if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
-                    converted = True
-            except Exception:
-                pass
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-i", temp_path,
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "fast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+                    "-movflags", "+faststart", final_path
+                ],
+                capture_output=True, text=True, timeout=900
+            )
+            if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
+                converted = True
+        except Exception:
+            pass
 
         try:
             if os.path.exists(temp_path):
@@ -795,7 +785,7 @@ async def on_message(e):
                 await msg.delete()
             except Exception:
                 pass
-            return await respond(e, "فشل تجهيز الفيديو (FFmpeg Error)")
+            return await respond(e, "فشل تجهيز الفيديو، تأكد من وجود FFmpeg على الخادم")
 
         actual = os.path.getsize(final_path)
         add_video(uid, final_path, final_name, actual)
@@ -804,7 +794,7 @@ async def on_message(e):
             await msg.delete()
         except Exception:
             pass
-        await respond(e, f"تم حفظ الفيديو\nالاسم: {final_name}\nالحجم: {format_size(actual)}", buttons=back_button())
+        await respond(e, f"تم حفظ الفيديو جاهزاً للبث\nالاسم: {final_name}\nالحجم: {format_size(actual)}", buttons=back_button())
         return
 
     if step == "chat":
@@ -822,6 +812,7 @@ async def on_message(e):
         await respond(e, f"تم تعيين: {result}\nID: {cid}", buttons=back_button())
         return
 
+    # ===== ADMIN INPUT =====
     if uid != DEV_ID:
         return
 
@@ -856,9 +847,11 @@ async def on_message(e):
         await respond(e, f"تم حذف {tid}", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
         return
 
+
 async def finish_login(e, cli, phone, uid):
     me = await cli.get_me()
     await finish_login_with_client(e, cli, phone, me, uid)
+
 
 async def finish_login_with_client(e, cli, phone, me, uid):
     aid = me.id
@@ -881,6 +874,10 @@ async def finish_login_with_client(e, cli, phone, me, uid):
     login_pending.pop(uid, None)
     await respond(e, f"تم اضافة: {me.first_name} (@{me.username or '-'})", buttons=back_button())
 
+
+# ============================================================
+# بدء البث
+# ============================================================
 @bot.on(events.CallbackQuery(data=b"start_stream"))
 async def cb_start_stream(e):
     uid = e.sender_id
@@ -892,11 +889,13 @@ async def cb_start_stream(e):
     if not accs:
         return await edit(e, "لا يوجد حسابات", buttons=back_button())
     vid = get_video(uid)
-    if not vid or not vid.get("file_path") or not os.path.exists(vid["file_path"]):
-        return await edit(e, "لا يوجد فيديو، يرجى إضافة فيديو أولاً.", buttons=back_button())
+    if not vid:
+        return await edit(e, "لا يوجد فيديو", buttons=back_button())
     ch = get_chat(uid)
     if not ch:
         return await edit(e, "لا يوجد رابط اتصال", buttons=back_button())
+    if not os.path.exists(vid["file_path"]):
+        return await edit(e, f"الملف مفقود", buttons=back_button())
 
     await edit(e, "جاري بدء البث...")
     st = get_state(uid)
@@ -928,6 +927,8 @@ async def cb_start_stream(e):
         try:
             await cli(GetParticipantRequest(channel=chat_id, participant=aid))
             joined = True
+        except UserNotParticipantError:
+            joined = False
         except Exception:
             joined = False
 
@@ -962,15 +963,14 @@ async def cb_start_stream(e):
                 continue
 
         try:
-            # توافق مع الإصدارات الحديثة لـ PyTgCalls وبدون الحاجة لـ GroupCallConfig الخاطئة
-            await call.play(
-                chat_id,
-                MediaStream(
-                    vid["file_path"],
-                    audio_parameters=AudioQuality.HIGH,
-                    video_parameters=VideoQuality.HD_720p
-                )
+            # تم التعديل هنا لتمرير المسارات والصيغة بشكل آمن لمنع FFmpegError
+            stream = MediaStream(
+                vid["file_path"],
+                audio_parameters=AudioQuality.HIGH,
+                video_parameters=VideoQuality.HD_720p,
+                ffmpeg_parameters="-loglevel error"
             )
+            await call.play(chat_id, stream, config=GroupCallConfig(auto_start=False))
             set_active_stream(uid, aid, chat_id, title, vid["id"])
 
             duration = 0
@@ -999,12 +999,21 @@ async def cb_start_stream(e):
             break
         except Exception as ex:
             err = type(ex).__name__
-            errors.append(f"{acc['first_name']}: {err}")
+            if "NoActive" in err or "GroupCallNotFound" in err:
+                errors.append(f"{acc['first_name']}: لا توجد مكالمة")
+            elif "ChatAdminRequired" in err or "ADMIN" in err:
+                errors.append(f"{acc['first_name']}: يحتاج صلاحية")
+            else:
+                errors.append(f"{acc['first_name']}: {err}")
             continue
 
     if not done:
         await edit(e, "فشل البث:\n\n" + "\n".join(errors[:5]), buttons=back_button())
 
+
+# ============================================================
+# ايقاف
+# ============================================================
 @bot.on(events.CallbackQuery(data=b"stop_stream"))
 async def cb_stop(e):
     uid = e.sender_id
@@ -1027,6 +1036,10 @@ async def cb_stop(e):
     await edit(e, "تم الايقاف وحذف الفيديو", buttons=back_button())
     await e.answer("تم")
 
+
+# ============================================================
+# /admin
+# ============================================================
 def admin_menu():
     return [
         [Button.inline("الاحصائيات", b"adm_stats", style='primary')],
@@ -1060,6 +1073,9 @@ async def cb_stats(e):
     await edit(e, txt, buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
     await e.answer()
 
+# ============================================================
+# عرض المشتركين - أيام متبقية + اسم + ID
+# ============================================================
 @bot.on(events.CallbackQuery(data=b"adm_list_subs"))
 async def cb_list_subs(e):
     if e.sender_id != DEV_ID:
@@ -1078,6 +1094,9 @@ async def cb_list_subs(e):
     await edit(e, txt[:4000], buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
     await e.answer()
 
+# ============================================================
+# اضف مشترك
+# ============================================================
 @bot.on(events.CallbackQuery(data=b"adm_add_sub"))
 async def cb_addsub(e):
     if e.sender_id != DEV_ID:
@@ -1086,6 +1105,9 @@ async def cb_addsub(e):
     await edit(e, "ارسل ID المستخدم", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
     await e.answer()
 
+# ============================================================
+# حذف مشترك - أزرار
+# ============================================================
 @bot.on(events.CallbackQuery(data=b"adm_del_sub"))
 async def cb_delsub(e):
     if e.sender_id != DEV_ID:
@@ -1123,10 +1145,13 @@ async def cb_delallsubs(e):
     await edit(e, f"تم حذف {n} مشترك", buttons=[[Button.inline("رجوع", b"adm_back", style='danger')]])
     await e.answer("تم")
 
+# ============================================================
+# الاتصالات الجارية
+# ============================================================
 @bot.on(events.CallbackQuery(data=b"adm_active"))
 async def cb_act(e):
     if e.sender_id != DEV_ID:
-        return await e.answer("غير المؤهلين", alert=True)
+        return await e.answer("غير مصرح", alert=True)
     streams = get_all_active_streams()
     txt = "الاتصالات النشطة:\n\n"
     for s in streams:
@@ -1165,6 +1190,9 @@ async def cb_adm_back(e):
     await edit(e, "لوحة المطور", buttons=admin_menu())
     await e.answer()
 
+# ============================================================
+# Main
+# ============================================================
 async def main():
     init_db()
     await bot.start(bot_token=BOT_TOKEN)
