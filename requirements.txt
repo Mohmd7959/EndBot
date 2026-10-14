@@ -1,2 +1,2 @@
-https://github.com/pytgcalls/pytgcalls.git
+pytgcalls
 telethon 
