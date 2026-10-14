@@ -12,7 +12,7 @@ from telethon.errors import (MessageNotModifiedError, UserNotParticipantError,
     FloodWaitError, ChannelsTooMuchError, PhoneNumberInvalidError)
 from telethon.utils import get_peer_id
 from pytgcalls import PyTgCalls, idle
-from pytgcalls.types import MediaStream, GroupCallConfig, AudioQuality, VideoQuality
+from pytgcalls.types import MediaStream, GroupCallConfig
 from config import *
 
 bot = TelegramClient("bot_session", API_ID, API_HASH)
@@ -844,7 +844,7 @@ async def finish_login_with_client(e, cli, phone, me, uid):
 
 
 # ============================================================
-# بدء البث (بدون استخدام معاملات تفرض وجود FFmpeg قسرياً)
+# بدء البث (النسخة المعدلة والآمنة لتجاوز أخطاء FFmpeg)
 # ============================================================
 @bot.on(events.CallbackQuery(data=b"start_stream"))
 async def cb_start_stream(e):
@@ -862,7 +862,9 @@ async def cb_start_stream(e):
     ch = get_chat(uid)
     if not ch:
         return await edit(e, "لا يوجد رابط اتصال", buttons=back_button())
-    if not os.path.exists(vid["file_path"]):
+    
+    file_path = vid["file_path"]
+    if not os.path.exists(file_path):
         return await edit(e, f"الملف مفقود", buttons=back_button())
 
     await edit(e, "جاري بدء البث...")
@@ -931,11 +933,10 @@ async def cb_start_stream(e):
                 continue
 
         try:
-            # تشغيل الفيديو مباشرة لتجنب تفعيل المعالجة الخارجية المسببة للخطأ
+            abs_path = os.path.abspath(file_path)
             await call.play(
                 chat_id,
-                MediaStream(vid["file_path"]),
-                config=GroupCallConfig(auto_start=False)
+                MediaStream(abs_path)
             )
             set_active_stream(uid, aid, chat_id, title, vid["id"])
 
@@ -943,7 +944,7 @@ async def cb_start_stream(e):
             try:
                 probe = subprocess.run(
                     ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                     "-of", "csv=p=0", vid["file_path"]],
+                     "-of", "csv=p=0", abs_path],
                     capture_output=True, text=True, timeout=5
                 )
                 duration = int(float(probe.stdout.strip()))
@@ -956,7 +957,7 @@ async def cb_start_stream(e):
 
             if duration > 0:
                 task = asyncio.create_task(
-                    auto_leave_when_done(uid, aid, chat_id, duration, vid["file_path"])
+                    auto_leave_when_done(uid, aid, chat_id, duration, abs_path)
                 )
                 auto_leave_tasks[uid] = task
 
@@ -964,13 +965,8 @@ async def cb_start_stream(e):
             done = True
             break
         except Exception as ex:
-            err = type(ex).__name__
-            if "NoActive" in err or "GroupCallNotFound" in err:
-                errors.append(f"{acc['first_name']}: لا توجد مكالمة")
-            elif "ChatAdminRequired" in err or "ADMIN" in err:
-                errors.append(f"{acc['first_name']}: يحتاج صلاحية")
-            else:
-                errors.append(f"{acc['first_name']}: {err}")
+            err = str(ex)
+            errors.append(f"{acc['first_name']}: {type(ex).__name__}")
             continue
 
     if not done:
