@@ -1,2 +1,3 @@
 py-tgcalls @ git+https://github.com/pytgcalls/pytgcalls.git#egg=py-tgcalls
 telethon
+ffmpeg-python
