@@ -334,7 +334,7 @@ def main_menu():
         [Button.inline("حذف حساب", b"del_account", style='danger')],
         [Button.inline("اضف فيديو", b"add_video", style='primary')],
         [Button.inline("رابط الاتصال", b"set_chat", style='primary')],
-        [Button.inline("بدء البث", b"start_stream", style='success')],
+        [Button.inline("بدء المكالمة", b"start_stream", style='success')],
         [Button.inline("ايقاف", b"stop_stream", style='danger')],
     ]
 
@@ -420,20 +420,6 @@ async def resolve_chat(uid, link):
             return None, f"تعذر: {type(ex).__name__}", None
 
     return None, "صيغة غير معروفة", None
-
-async def auto_leave_when_done(uid, aid, chat_id, duration, video_path):
-    try:
-        await asyncio.sleep(duration + 3)
-    except asyncio.CancelledError:
-        return
-    st = get_state(uid)
-    call = st["calls"].get(aid)
-    if call:
-        try:
-            await call.leave_call(chat_id)
-        except Exception:
-            pass
-    remove_active_stream(uid)
 
 @bot.on(events.NewMessage(pattern=r"^/start$"))
 async def cmd_start(e):
@@ -869,38 +855,14 @@ async def cb_start_stream(e):
                 continue
 
         try:
+            # تشغيل الفيديو مباشرة بدون معالجة FFmpeg الداخلية لمنع خطأ FFmpegError
             await call.play(
                 chat_id,
-                MediaStream(
-                    vid["file_path"],
-                    audio_parameters=AudioQuality.HIGH,
-                    video_parameters=VideoQuality.HD_720p
-                )
+                MediaStream(vid["file_path"])
             )
             set_active_stream(uid, aid, chat_id, title, vid["id"])
 
-            duration = 0
-            try:
-                probe = subprocess.run(
-                    ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                     "-of", "csv=p=0", vid["file_path"]],
-                    capture_output=True, text=True, timeout=10
-                )
-                duration = int(float(probe.stdout.strip()))
-            except Exception:
-                duration = 0
-
-            old_task = auto_leave_tasks.pop(uid, None)
-            if old_task:
-                old_task.cancel()
-
-            if duration > 0:
-                task = asyncio.create_task(
-                    auto_leave_when_done(uid, aid, chat_id, duration, vid["file_path"])
-                )
-                auto_leave_tasks[uid] = task
-
-            await edit(e, f"تم بدء تشغيل الفيديو في مكالمة:\n{title}\n\nالحساب: {acc['first_name']}", buttons=back_button())
+            await edit(e, f"تم بدء تشغيل الفيديو في المكالمة:\n{title}\n\nالحساب: {acc['first_name']}", buttons=back_button())
             done = True
             break
         except Exception as ex:
