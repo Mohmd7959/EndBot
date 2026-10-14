@@ -296,7 +296,7 @@ def get_all_active_streams():
         c.close()
 
 def mask_phone(p):
-    if not p: return "unknown"
+    if not p: return "بدون رقم"
     p = str(p)
     return p[:8] + "*" * 4 if len(p) > 8 else p[:4] + "*" * (len(p) - 4)
 
@@ -412,7 +412,7 @@ async def resolve_chat(uid, link):
 
     return None, "صيغة غير معروفة", None
 
-async def auto_leave_when_done(uid, aid, chat_id, duration, video_path):
+async def auto_leave_when_done(uid, aid, chat_id, duration):
     try:
         await asyncio.sleep(duration + 3)
     except asyncio.CancelledError:
@@ -424,13 +424,8 @@ async def auto_leave_when_done(uid, aid, chat_id, duration, video_path):
             await call.leave_call(chat_id)
         except Exception:
             pass
-    try:
-        if video_path and os.path.exists(video_path):
-            os.remove(video_path)
-    except Exception:
-        pass
+    # تم إزالة حذف الفيديو هنا لكي يبقى محفوظاً ولا يُحذف أبداً عند انتهاء البث
     remove_active_stream(uid, aid)
-    remove_video(uid, aid)
 
 @bot.on(events.NewMessage(pattern=r"^/start$"))
 async def cmd_start(e):
@@ -498,7 +493,8 @@ async def cb_check(e):
         vid = get_video(e.sender_id, a["account_id"])
         vid_status = f"فيديو مرفق ({vid['file_name']})" if vid else "لا يوجد فيديو مرفق"
         uname = f"@{a['username']}" if a['username'] else "-"
-        txt += f"{i}. {mask_phone(a['phone'])}\n   الاسم: {a['first_name'] or '-'}\n   اليوزر: {uname}\n   الحالة: {status}\n   {vid_status}\n\n"
+        acc_name = a['first_name'] if a['first_name'] else mask_phone(a['phone'])
+        txt += f"{i}. {acc_name}\n   الرقم: {mask_phone(a['phone'])}\n   اليوزر: {uname}\n   الحالة: {status}\n   {vid_status}\n\n"
     await edit(e, txt, buttons=back_button())
     await e.answer()
 
@@ -511,7 +507,8 @@ async def cb_del(e):
         return await edit(e, "لا يوجد حسابات", buttons=back_button())
     btns = []
     for a in accs:
-        lbl = f"{mask_phone(a['phone'])} - {a['first_name'] or 'unknown'}"
+        acc_name = a['first_name'] if a['first_name'] else mask_phone(a['phone'])
+        lbl = f"{acc_name}"
         btns.append([Button.inline(lbl, f"del_acc_{a['account_id']}".encode(), style='danger')])
     btns.append([Button.inline("حذف الكل", b"del_all_acc", style='danger')])
     btns.append([Button.inline("رجوع", b"back_main", style='primary')])
@@ -581,7 +578,8 @@ async def cb_add_video_menu(e):
     for a in accs:
         vid = get_video(uid, a["account_id"])
         has_v = "✅ (مرفق فيديو)" if vid else "❌ (بدون فيديو)"
-        lbl = f"{mask_phone(a['phone'])} {has_v}"
+        acc_name = a['first_name'] if a['first_name'] else mask_phone(a['phone'])
+        lbl = f"{acc_name} {has_v}"
         btns.append([Button.inline(lbl, f"select_vid_acc_{a['account_id']}".encode(), style='primary')])
     btns.append([Button.inline("رجوع", b"back_main", style='danger')])
     await edit(e, "اختر الحساب الذي تريد رفع فيديو خاص به:", buttons=btns)
@@ -621,7 +619,8 @@ async def cb_stream_menu(e):
         aid = a["account_id"]
         active = get_active_stream(uid, aid)
         status_txt = "🟢 يبث حالياً" if active else "🔴 متوقف"
-        btns.append([Button.inline(f"تحكم بالحساب: {mask_phone(a['phone'])} [{status_txt}]", f"control_acc_{aid}".encode(), style='primary')])
+        acc_name = a['first_name'] if a['first_name'] else mask_phone(a['phone'])
+        btns.append([Button.inline(f"تحكم بالحساب: {acc_name} [{status_txt}]", f"control_acc_{aid}".encode(), style='primary')])
     
     btns.append([Button.inline("⚡ تشغيل كل الحسابات معاً", b"start_all_streams", style='success')])
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
@@ -645,13 +644,14 @@ async def cb_control_acc(e):
     
     status_txt = f"البث الحالي: يبث في ({active['chat_title']})" if active else "الحالة: متوقف"
     vid_txt = f"الفيديو: {vid['file_name']}" if vid else "⚠️ تنبيه: لم ترفع فيديو لهذا الحساب بعد!"
+    acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
 
     btns = [
         [Button.inline("▶️ بدء البث لهذا الحساب فقط", f"start_one_{aid}".encode(), style='success')],
         [Button.inline("⏹️ إيقاف البث لهذا الحساب", f"stop_one_{aid}".encode(), style='danger')],
         [Button.inline("رجوع للقائمة", b"stream_menu", style='primary')]
     ]
-    await edit(e, f"حساب: {mask_phone(acc['phone'])}\nالاسم: {acc['first_name']}\n{vid_txt}\n{status_txt}", buttons=btns)
+    await edit(e, f"حساب: {acc_name}\nالرقم: {mask_phone(acc['phone'])}\n{vid_txt}\n{status_txt}", buttons=btns)
     await e.answer()
 
 @bot.on(events.NewMessage())
@@ -868,7 +868,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
     
     vid = get_video(uid, aid)
     if not vid or not os.path.exists(vid["file_path"]):
-        return False, f"لا يوجد فيديو مخصص للحساب {mask_phone(acc['phone'])}"
+        return False, f"لا يوجد فيديو مخصص للحساب {acc['first_name'] or mask_phone(acc['phone'])}"
 
     cli = st["clients"].get(aid)
     call = st["calls"].get(aid)
@@ -912,7 +912,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
             pass
 
     if not joined:
-        return False, f"الحساب {mask_phone(acc['phone'])} ليس عضواً في القناة ولم يتمكن من الانضمام"
+        return False, f"الحساب ليس عضواً في القناة ولم يتمكن من الانضمام"
 
     try:
         await call.play(chat_id, MediaStream(vid["file_path"],
@@ -935,7 +935,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
 
         if duration > 0:
             asyncio.create_task(
-                auto_leave_when_done(uid, aid, chat_id, duration, vid["file_path"])
+                auto_leave_when_done(uid, aid, chat_id, duration)
             )
 
         return True, "تم البث بنجاح"
@@ -976,7 +976,7 @@ async def cb_stop_one(e):
         except Exception:
             pass
     remove_active_stream(uid, aid)
-    await edit(e, "⏹️ تم إيقاف البث لهذا الحساب.", buttons=back_button())
+    await edit(e, "⏹️ تم إيقاف البث لهذا الحساب (وبقي ملف الفيديو محفوظاً).", buttons=back_button())
     await e.answer("تم الإيقاف")
 
 @bot.on(events.CallbackQuery(data=b"start_all_streams"))
@@ -998,7 +998,7 @@ async def cb_start_all(e):
     for acc in accs:
         aid = acc["account_id"]
         success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
-        acc_name = mask_phone(acc['phone'])
+        acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
         if success:
             results.append(f"حساب {acc_name}: 🟢 يعمل بنجاح")
         else:
@@ -1023,7 +1023,7 @@ async def cb_stop_all(e):
                 pass
         remove_active_stream(uid, aid)
 
-    await edit(e, "🛑 تم إيقاف جميع البثوث النشطة لكافة حساباتك.", buttons=back_button())
+    await edit(e, "🛑 تم إيقاف جميع البثوث النشطة (وبقيت ملفات الفيديوهات محفوظة).", buttons=back_button())
     await e.answer("تم الإيقاف الجماعي")
 
 def admin_menu():
