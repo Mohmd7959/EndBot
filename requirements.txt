@@ -1,2 +1,2 @@
-pytgcalls @ git+https://github.com/pytgcalls/pytgcalls.git
+py-tgcalls @ git+https://github.com/pytgcalls/pytgcalls.git#egg=py-tgcalls
 telethon
