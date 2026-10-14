@@ -12,7 +12,7 @@ from telethon.errors import (MessageNotModifiedError, UserNotParticipantError,
     FloodWaitError, ChannelsTooMuchError, PhoneNumberInvalidError)
 from telethon.utils import get_peer_id
 from pytgcalls import PyTgCalls, idle
-from pytgcalls.types import MediaStream, GroupCallConfig, AudioQuality, VideoQuality
+from pytgcalls.types import MediaStream, AudioQuality, VideoQuality
 from config import *
 
 bot = TelegramClient("bot_session", API_ID, API_HASH)
@@ -433,13 +433,8 @@ async def auto_leave_when_done(uid, aid, chat_id, duration, video_path):
             await call.leave_call(chat_id)
         except Exception:
             pass
-    try:
-        if video_path and os.path.exists(video_path):
-            os.remove(video_path)
-    except Exception:
-        pass
+    # إزالة البث النشط فقط دون حذف سجل الفيديو نهائياً لكي لا تظهر مشكلة "أضف فيديو أولاً" فور انتهاء العرض
     remove_active_stream(uid)
-    delete_video_file(uid)
 
 @bot.on(events.NewMessage(pattern=r"^/start$"))
 async def cmd_start(e):
@@ -685,12 +680,28 @@ async def on_message(e):
                 pass
         remove_video(uid)
 
+        orig_ext = ".mp4"
+        for attr in (getattr(media, "attributes", None) or []):
+            if hasattr(attr, "file_name") and attr.file_name:
+                ext = os.path.splitext(attr.file_name.lower())[1]
+                if ext:
+                    orig_ext = ext
+                break
+        if orig_ext not in (".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".3gp"):
+            mime = getattr(media, "mime_type", "") or ""
+            if "webm" in mime: orig_ext = ".webm"
+            elif "matroska" in mime: orig_ext = ".mkv"
+            elif "quicktime" in mime: orig_ext = ".mov"
+            elif "3gpp" in mime: orig_ext = ".3gp"
+            else: orig_ext = ".mp4"
+
+        temp_path = os.path.join(VIDEOS_DIR, f"temp_{uid}_{media.id}{orig_ext}")
         final_name = f"{uid}_{media.id}.mp4"
         final_path = os.path.join(VIDEOS_DIR, final_name)
 
-        msg = await respond(e, "جاري حفظ وتجهيز الفيديو...")
+        msg = await respond(e, "جاري التحميل...")
         try:
-            await e.download_media(file=final_path)
+            await e.download_media(file=temp_path)
         except Exception as ex:
             try:
                 await msg.delete()
@@ -698,10 +709,10 @@ async def on_message(e):
                 pass
             return await respond(e, f"فشل التحميل: {type(ex).__name__}")
 
-        if not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
+        if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
             try:
-                if os.path.exists(final_path):
-                    os.remove(final_path)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
             except Exception:
                 pass
             try:
@@ -709,6 +720,82 @@ async def on_message(e):
             except Exception:
                 pass
             return await respond(e, "الملف فارغ")
+
+        try:
+            r = subprocess.run(
+                ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=codec_type", "-of", "csv=p=0", temp_path],
+                capture_output=True, text=True, timeout=15
+            )
+            if "video" not in r.stdout.lower():
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+                try:
+                    await msg.delete()
+                except Exception:
+                    pass
+                return await respond(e, "الملف ليس فيديو")
+        except Exception:
+            pass
+
+        try:
+            await msg.edit("جاري التحويل إلى MP4...")
+        except Exception:
+            pass
+
+        converted = False
+        if orig_ext == ".mp4":
+            try:
+                shutil.copy2(temp_path, final_path)
+                if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
+                    converted = True
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if not converted:
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", temp_path,
+                     "-c", "copy", "-movflags", "+faststart", final_path],
+                    capture_output=True, text=True, timeout=300
+                )
+                if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
+                    converted = True
+            except Exception:
+                pass
+
+        if not converted:
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", temp_path,
+                     "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                     "-c:a", "aac", "-b:a", "128k",
+                     "-movflags", "+faststart", final_path],
+                    capture_output=True, text=True, timeout=900
+                )
+                if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
+                    converted = True
+            except Exception:
+                pass
+
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+
+        if not converted or not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            return await respond(e, "فشل تجهيز الفيديو (FFmpeg Error)")
 
         actual = os.path.getsize(final_path)
         add_video(uid, final_path, final_name, actual)
@@ -805,15 +892,11 @@ async def cb_start_stream(e):
     if not accs:
         return await edit(e, "لا يوجد حسابات", buttons=back_button())
     vid = get_video(uid)
-    if not vid:
-        return await edit(e, "لا يوجد فيديو", buttons=back_button())
+    if not vid or not vid.get("file_path") or not os.path.exists(vid["file_path"]):
+        return await edit(e, "لا يوجد فيديو، يرجى إضافة فيديو أولاً.", buttons=back_button())
     ch = get_chat(uid)
     if not ch:
         return await edit(e, "لا يوجد رابط اتصال", buttons=back_button())
-    
-    file_path = vid["file_path"]
-    if not os.path.exists(file_path):
-        return await edit(e, f"الملف مفقود", buttons=back_button())
 
     await edit(e, "جاري بدء البث...")
     st = get_state(uid)
@@ -845,8 +928,6 @@ async def cb_start_stream(e):
         try:
             await cli(GetParticipantRequest(channel=chat_id, participant=aid))
             joined = True
-        except UserNotParticipantError:
-            joined = False
         except Exception:
             joined = False
 
@@ -881,11 +962,14 @@ async def cb_start_stream(e):
                 continue
 
         try:
-            abs_path = os.path.abspath(file_path)
-            # استبدال الإعدادات القديمة بطريقة مباشرة وآمنة لعدم تفعيل خطأ الـ FFmpegError
+            # توافق مع الإصدارات الحديثة لـ PyTgCalls وبدون الحاجة لـ GroupCallConfig الخاطئة
             await call.play(
                 chat_id,
-                MediaStream(abs_path)
+                MediaStream(
+                    vid["file_path"],
+                    audio_parameters=AudioQuality.HIGH,
+                    video_parameters=VideoQuality.HD_720p
+                )
             )
             set_active_stream(uid, aid, chat_id, title, vid["id"])
 
@@ -893,8 +977,8 @@ async def cb_start_stream(e):
             try:
                 probe = subprocess.run(
                     ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                     "-of", "csv=p=0", abs_path],
-                    capture_output=True, text=True, timeout=5
+                     "-of", "csv=p=0", vid["file_path"]],
+                    capture_output=True, text=True, timeout=15
                 )
                 duration = int(float(probe.stdout.strip()))
             except Exception:
@@ -906,7 +990,7 @@ async def cb_start_stream(e):
 
             if duration > 0:
                 task = asyncio.create_task(
-                    auto_leave_when_done(uid, aid, chat_id, duration, abs_path)
+                    auto_leave_when_done(uid, aid, chat_id, duration, vid["file_path"])
                 )
                 auto_leave_tasks[uid] = task
 
@@ -914,8 +998,8 @@ async def cb_start_stream(e):
             done = True
             break
         except Exception as ex:
-            err = str(ex)
-            errors.append(f"{acc['first_name']}: {type(ex).__name__}")
+            err = type(ex).__name__
+            errors.append(f"{acc['first_name']}: {err}")
             continue
 
     if not done:
@@ -1042,7 +1126,7 @@ async def cb_delallsubs(e):
 @bot.on(events.CallbackQuery(data=b"adm_active"))
 async def cb_act(e):
     if e.sender_id != DEV_ID:
-        return await e.answer("غير مصرح", alert=True)
+        return await e.answer("غير المؤهلين", alert=True)
     streams = get_all_active_streams()
     txt = "الاتصالات النشطة:\n\n"
     for s in streams:
