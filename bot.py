@@ -730,13 +730,12 @@ async def on_message(e):
                 pass
         remove_video(uid)
 
-        temp_path = os.path.join(VIDEOS_DIR, f"temp_{uid}_{media.id}.mp4")
         final_name = f"{uid}_{media.id}.mp4"
         final_path = os.path.join(VIDEOS_DIR, final_name)
 
-        msg = await respond(e, "جاري تحميل ومعالجة الفيديو...")
+        msg = await respond(e, "جاري حفظ الفيديو...")
         try:
-            await e.download_media(file=temp_path)
+            await e.download_media(file=final_path)
         except Exception as ex:
             try:
                 await msg.delete()
@@ -744,10 +743,10 @@ async def on_message(e):
                 pass
             return await respond(e, f"فشل التحميل: {type(ex).__name__}")
 
-        if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+        if not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
             try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+                if os.path.exists(final_path):
+                    os.remove(final_path)
             except Exception:
                 pass
             try:
@@ -755,35 +754,6 @@ async def on_message(e):
             except Exception:
                 pass
             return await respond(e, "الملف فارغ")
-
-        # معالجة وتحويل الفيديو بطريقة مباشرة وآمنة عبر FFmpeg
-        converted = False
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-i", temp_path,
-                    "-c:v", "libx264", "-preset", "ultrafast",
-                    "-c:a", "aac", "-movflags", "+faststart", final_path
-                ],
-                capture_output=True, text=True, timeout=300
-            )
-            if os.path.exists(final_path) and os.path.getsize(final_path) > 0:
-                converted = True
-        except Exception:
-            converted = False
-
-        try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except Exception:
-            pass
-
-        if not converted or not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
-            try:
-                await msg.delete()
-            except Exception:
-                pass
-            return await respond(e, "فشل تجهيز الفيديو، تأكد من وجود FFmpeg على الخادم وصلاحية الملف")
 
         actual = os.path.getsize(final_path)
         add_video(uid, final_path, final_name, actual)
