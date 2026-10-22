@@ -17,4 +17,6 @@ for d in [DATA_DIR, SESSIONS_DIR, VIDEOS_DIR]:
     os.makedirs(d, exist_ok=True)
 
 MAX_ACCOUNTS_FREE = 5
+MAX_ACCOUNTS_SUB = 100  # دعم لحد 100 حساب
+_FREE = 5
 MAX_ACCOUNTS_SUB = 10
