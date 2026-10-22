@@ -43,7 +43,19 @@ def init_db():
     )""")
     c.execute("CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, account_id INTEGER, phone TEXT, first_name TEXT, username TEXT, session_file TEXT, added_at TEXT, UNIQUE(user_id, account_id))")
     
-    # جدول الفيديو الموحد لكل مستخدم
+    # جدول الفيديوهات الخاصة بكل حساب على حدة
+    c.execute("""CREATE TABLE IF NOT EXISTS videos(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        user_id INTEGER, 
+        account_id INTEGER, 
+        file_path TEXT, 
+        file_name TEXT, 
+        file_size INTEGER, 
+        added_at TEXT,
+        UNIQUE(user_id, account_id)
+    )""")
+
+    # جدول الفيديو الموحد لجميع الحسابات
     c.execute("""CREATE TABLE IF NOT EXISTS global_videos(
         user_id INTEGER PRIMARY KEY, 
         file_path TEXT, 
@@ -210,6 +222,31 @@ def remove_all_accounts(uid):
     finally:
         c.close()
 
+def add_video(uid, aid, path, name, size):
+    c = db()
+    try:
+        c.execute("INSERT OR REPLACE INTO videos(user_id, account_id, file_path, file_name, file_size, added_at) VALUES(?,?,?,?,?,?)", (uid, aid, path, name, size, datetime.now().isoformat()))
+        c.commit()
+    finally:
+        c.close()
+
+def get_video(uid, aid):
+    c = db()
+    try:
+        r = c.execute("SELECT * FROM videos WHERE user_id=? AND account_id=?", (uid, aid)).fetchone()
+        return dict(r) if r else None
+    finally:
+        c.close()
+
+def remove_video(uid, aid):
+    c = db()
+    try:
+        r = c.execute("DELETE FROM videos WHERE user_id=? AND account_id=?", (uid, aid))
+        c.commit()
+        return r.rowcount > 0
+    finally:
+        c.close()
+
 def set_global_video(uid, path, name, size):
     c = db()
     try:
@@ -329,7 +366,8 @@ def main_menu():
         [Button.inline("➕ اضف حساب", b"add_account", style='success')],
         [Button.inline("🛡️ فحص حساباتي", b"check_accounts", style='primary')],
         [Button.inline("🗑️ حذف حساب", b"del_account", style='danger')],
-        [Button.inline("🎥 تعيين فيديو البث العام", b"set_global_video", style='primary')],
+        [Button.inline("🎥 فيديو لكل حساب", b"add_video_menu", style='primary')],
+        [Button.inline("🌐 فيديو موحد لكل الحسابات", b"set_global_video", style='primary')],
         [Button.inline("🔗 رابط الاتصال (المجموعة)", b"set_chat", style='primary')],
         [Button.inline("⚡ قائمة البث والتحكم", b"stream_menu", style='success')],
     ]
@@ -343,7 +381,6 @@ async def resolve_chat(uid, link):
     link = link.strip()
     st = get_state(uid)
     if not st["clients"]:
-        # استخدام أول حساب متوفر في ملفات الجلسات إذا لم يكن محملاً في الذاكرة لتجاوز مشكلة "اضف حساب اولاً"
         accs = get_accounts(uid)
         if not accs:
             return None, "اضف حساب اولاً", None
@@ -488,9 +525,11 @@ async def cb_check(e):
     for i, a in enumerate(accs, 1):
         cli = get_state(e.sender_id)["clients"].get(a["account_id"])
         status = "🟢 متصل" if cli and cli.is_connected() else "🔴 غير متصل"
+        vid = get_video(e.sender_id, a["account_id"])
+        v_status = f"✅ فيديو خاص ({vid['file_name'])})" if vid else "❌ بدون فيديو خاص"
         uname = f"@{a['username']}" if a['username'] else "-"
         acc_name = a['first_name'] if a['first_name'] else mask_phone(a['phone'])
-        txt += f"✨ {i}. **{acc_name}**\n   📞 الرقم: `{mask_phone(a['phone'])}`\n   🌐 اليوزر: {uname}\n   ⚙️ الحالة: {status}\n\n"
+        txt += f"✨ {i}. **{acc_name}**\n   📞 الرقم: `{mask_phone(a['phone'])}`\n   🌐 اليوزر: {uname}\n   ⚙️ الحالة: {status}\n   {v_status}\n\n"
     await edit(e, txt, buttons=back_button())
     await e.answer()
 
@@ -525,6 +564,14 @@ async def cb_del_one(e):
         st["clients"].pop(aid, None)
         st["calls"].pop(aid, None)
     
+    vid = get_video(uid, aid)
+    if vid and vid.get("file_path") and os.path.exists(vid["file_path"]):
+        try:
+            os.remove(vid["file_path"])
+        except Exception:
+            pass
+    remove_video(uid, aid)
+
     acc = get_account(uid, aid)
     if acc and acc.get("session_file") and os.path.exists(acc["session_file"]):
         try:
@@ -532,7 +579,7 @@ async def cb_del_one(e):
         except Exception:
             pass
     remove_account(uid, aid)
-    await edit(e, "✅ تم حذف الحساب بنجاح.", buttons=back_button())
+    await edit(e, "✅ تم حذف الحساب وفيديو المرتبط به بنجاح.", buttons=back_button())
     await e.answer("تم الحذف")
 
 @bot.on(events.CallbackQuery(data=b"del_all_acc"))
@@ -546,6 +593,14 @@ async def cb_del_all(e):
             await cli.disconnect()
         except Exception:
             pass
+        vid = get_video(uid, aid)
+        if vid and vid.get("file_path") and os.path.exists(vid["file_path"]):
+            try:
+                os.remove(vid["file_path"])
+            except Exception:
+                pass
+        remove_video(uid, aid)
+
     st["clients"].clear()
     st["calls"].clear()
     for a in get_accounts(uid):
@@ -555,8 +610,36 @@ async def cb_del_all(e):
             except Exception:
                 pass
     remove_all_accounts(uid)
-    await edit(e, "✅ تم حذف جميع الحسابات بنجاح.", buttons=back_button())
+    await edit(e, "✅ تم حذف جميع الحسابات والفيديوهات بنجاح.", buttons=back_button())
     await e.answer("تم حذف الكل")
+
+@bot.on(events.CallbackQuery(data=b"add_video_menu"))
+async def cb_add_video_menu(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    accs = get_accounts(uid)
+    if not accs:
+        return await edit(e, "⚠️ يجب إضافة حسابات أولاً لكي تتمكن من رفع فيديو لكل حساب!", buttons=back_button())
+    
+    btns = []
+    for a in accs:
+        vid = get_video(uid, a["account_id"])
+        has_v = "✅ (مرفق فيديو)" if vid else "❌ (بدون فيديو)"
+        acc_name = a['first_name'] if a['first_name'] else mask_phone(a['phone'])
+        btns.append([Button.inline(f"🎥 {acc_name} {has_v}", f"select_vid_acc_{a['account_id']}".encode(), style='primary')])
+    btns.append([Button.inline("🔙 رجوع", b"back_main", style='danger')])
+    await edit(e, "🎥 **اختر الحساب الذي تريد رفع فيديو خاص به:**", buttons=btns)
+    await e.answer()
+
+@bot.on(events.CallbackQuery(pattern=rb"^select_vid_acc_(\d+)$"))
+async def cb_select_vid_acc(e):
+    if not is_subscriber(e.sender_id):
+        return await e.answer("غير مصرح", alert=True)
+    aid = int(e.pattern_match.group(1))
+    login_pending[e.sender_id] = {"step": "video", "target_account_id": aid}
+    await edit(e, "📤 **أرسل الآن الفيديو (MP4) المخصص لهذا الحساب:**", buttons=back_button())
+    await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"set_global_video"))
 async def cb_set_global_video(e):
@@ -565,8 +648,8 @@ async def cb_set_global_video(e):
         return await e.answer("غير مصرح", alert=True)
     login_pending[uid] = {"step": "global_video"}
     vid = get_global_video(uid)
-    v_status = f"✅ يوجد فيديو مرفق حالياً: `{vid['file_name']}`" if vid else "❌ لا يوجد فيديو مرفق حالياً."
-    await edit(e, f"🎥 **تعيين فيديو البث العام لجميع الحسابات**\n{v_status}\n\nأرسل الآن فيديو (MP4) ليتم استخدامه لكل الحسابات المضافة:", buttons=back_button())
+    v_status = f"✅ يوجد فيديو موحد مرفق حالياً: `{vid['file_name']}`" if vid else "❌ لا يوجد فيديو موحد مرفق حالياً."
+    await edit(e, f"🌐 **تعيين فيديو موحد لجميع الحسابات**\n{v_status}\n\nأرسل الآن فيديو (MP4) ليتم اعتماده كفيديو رئيسي لكافة الحسابات:", buttons=back_button())
     await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"set_chat"))
@@ -588,8 +671,6 @@ async def cb_stream_menu(e):
     
     ch = get_chat(uid)
     chat_status = f"📌 المجموعة الحالية: `{ch['chat_title']}`" if ch else "❌ لم يتم تعيين مجموعة البث بعد!"
-    vid = get_global_video(uid)
-    vid_status = f"🎥 الفيديو العام: `{vid['file_name']}`" if vid else "⚠️ تنبيه: لم ترفع فيديو البث العام بعد!"
 
     btns = []
     for a in accs:
@@ -603,7 +684,7 @@ async def cb_stream_menu(e):
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
     btns.append([Button.inline("🔙 رجوع", b"back_main", style='danger')])
     
-    await edit(e, f"🎛️ **قائمة التحكم في البث:**\n{chat_status}\n{vid_status}\n\nاختر الحساب للتحكم المفرد أو شغل الكل دفعة واحدة:", buttons=btns)
+    await edit(e, f"🎛️ **قائمة التحكم في البث:**\n{chat_status}\n\nاختر الحساب للتحكم المفرد أو شغل الكل دفعة واحدة:", buttons=btns)
     await e.answer()
 
 @bot.on(events.CallbackQuery(pattern=rb"^control_acc_(\d+)$"))
@@ -617,6 +698,10 @@ async def cb_control_acc(e):
         return await e.answer("الحساب غير موجود", alert=True)
     
     active = get_active_stream(uid, aid)
+    vid = get_video(uid, aid)
+    g_vid = get_global_video(uid)
+    
+    vid_txt = f"🎥 فيديو خاص: {vid['file_name']}" if vid else ("🌐 فيديو موحد متاح" if g_vid else "⚠️ تنبيه: لا يوجد فيديو مخصص أو موحد لهذا الحساب!")
     status_txt = f"🟢 يبث حالياً في ({active['chat_title']})" if active else "🔴 الحالة: متوقف"
     acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
 
@@ -625,7 +710,7 @@ async def cb_control_acc(e):
         [Button.inline("⏹️ إيقاف البث لهذا الحساب", f"stop_one_{aid}".encode(), style='danger')],
         [Button.inline("🔙 رجوع للقائمة", b"stream_menu", style='primary')]
     ]
-    await edit(e, f"👤 **الحساب:** {acc_name}\n📞 الرقم: `{mask_phone(acc['phone'])}`\n{status_txt}", buttons=btns)
+    await edit(e, f"👤 **الحساب:** {acc_name}\n📞 الرقم: `{mask_phone(acc['phone'])}`\n{vid_txt}\n{status_txt}", buttons=btns)
     await e.answer()
 
 @bot.on(events.NewMessage())
@@ -704,24 +789,40 @@ async def on_message(e):
             return await respond(e, f"❌ خطأ: {type(ex).__name__}")
         return
 
-    if step == "global_video":
+    if step == "video":
+        target_aid = lp.get("target_account_id")
+        if not target_aid:
+            login_pending.pop(uid, None)
+            return await respond(e, "⚠️ حدث خطأ في تحديد الحساب المستهدف، أعد المحاولة.")
+
         media = e.video or e.document or e.gif
         if not media:
-            return await respond(e, "⚠️ ارسل فيديو صالح (MP4)")
+            return await respond(e, "⚠️ ارسل فيديو أو ملف صالح (MP4)")
         
         size = getattr(media, "size", 0) or 0
         if size > 500 * 1024 * 1024:
             return await respond(e, "⚠️ حجم الفيديو يتجاوز 500MB")
 
-        temp_path = os.path.join(VIDEOS_DIR, f"temp_global_{uid}_{media.id}.mp4")
-        final_name = f"global_{uid}.mp4"
+        old = get_video(uid, target_aid)
+        if old and old.get("file_path") and os.path.exists(old["file_path"]):
+            try:
+                os.remove(old["file_path"])
+            except Exception:
+                pass
+        remove_video(uid, target_aid)
+
+        temp_path = os.path.join(VIDEOS_DIR, f"temp_{uid}_{target_aid}_{media.id}.mp4")
+        final_name = f"{uid}_{target_aid}.mp4"
         final_path = os.path.join(VIDEOS_DIR, final_name)
 
-        msg = await respond(e, "⏳ جاري تحميل ومعالجة الفيديو العام...")
+        msg = await respond(e, "⏳ جاري تحميل ومعالجة الفيديو الخاص للحساب...")
         try:
             await e.download_media(file=temp_path)
         except Exception as ex:
-            try: await msg.delete() except Exception: pass
+            try:
+                await msg.delete()
+            except Exception:
+                pass
             return await respond(e, f"❌ فشل التحميل: {type(ex).__name__}")
 
         try:
@@ -736,26 +837,93 @@ async def on_message(e):
             shutil.copy2(temp_path, final_path)
 
         try:
-            if os.path.exists(temp_path): os.remove(temp_path)
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
         except Exception:
             pass
 
         if not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
-            try: await msg.delete() except Exception: pass
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            return await respond(e, "❌ فشل معالجة الفيديو")
+
+        actual = os.path.getsize(final_path)
+        add_video(uid, target_aid, final_path, final_name, actual)
+        login_pending.pop(uid, None)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        await respond(e, f"✅ تم حفظ الفيديو الخاص بالحساب بنجاح!\n📦 الحجم: {format_size(actual)}", buttons=back_button())
+        return
+
+    if step == "global_video":
+        media = e.video or e.document or e.gif
+        if not media:
+            return await respond(e, "⚠️ ارسل فيديو صالح (MP4)")
+        
+        size = getattr(media, "size", 0) or 0
+        if size > 500 * 1024 * 1024:
+            return await respond(e, "⚠️ حجم الفيديو يتجاوز 500MB")
+
+        temp_path = os.path.join(VIDEOS_DIR, f"temp_global_{uid}_{media.id}.mp4")
+        final_name = f"global_{uid}.mp4"
+        final_path = os.path.join(VIDEOS_DIR, final_name)
+
+        msg = await respond(e, "⏳ جاري تحميل ومعالجة الفيديو الموحد...")
+        try:
+            await e.download_media(file=temp_path)
+        except Exception as ex:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            return await respond(e, f"❌ فشل التحميل: {type(ex).__name__}")
+
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", temp_path,
+                 "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                 "-c:a", "aac", "-b:a", "128k",
+                 "-movflags", "+faststart", final_path],
+                capture_output=True, text=True, timeout=900
+            )
+        except Exception:
+            shutil.copy2(temp_path, final_path)
+
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+
+        if not os.path.exists(final_path) or os.path.getsize(final_path) == 0:
+            try:
+                await msg.delete()
+            except Exception:
+                pass
             return await respond(e, "❌ فشل معالجة الفيديو")
 
         actual = os.path.getsize(final_path)
         set_global_video(uid, final_path, final_name, actual)
         login_pending.pop(uid, None)
-        try: await msg.delete() except Exception: pass
-        await respond(e, f"✅ تم حفظ فيديو البث العام بنجاح!\n📦 الحجم: {format_size(actual)}", buttons=back_button())
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        await respond(e, f"✅ تم حفظ الفيديو الموحد لجميع الحسابات بنجاح!\n📦 الحجم: {format_size(actual)}", buttons=back_button())
         return
 
     if step == "chat":
         link = (e.text or "").strip()
         msg = await respond(e, "🔍 جاري التحقق والانضمام للرابط...")
         cid, result, invite_link = await resolve_chat(uid, link)
-        try: await msg.delete() except Exception: pass
+        try:
+            await msg.delete()
+        except Exception:
+            pass
         if cid is None:
             return await respond(e, f"❌ تعذر: {result}", buttons=back_button())
         set_chat(uid, cid, result, invite_link or link)
@@ -814,9 +982,18 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
     if not acc:
         return False, "الحساب غير موجود"
     
-    vid = get_global_video(uid)
-    if not vid or not os.path.exists(vid["file_path"]):
-        return False, "لم تقم بتعيين فيديو البث العام بعد"
+    # أولوية الفيديو: يبحث عن فيديو خاص بالحساب، وإذا لم يجد يبحث عن الفيديو الموحد العام
+    vid = get_video(uid, aid)
+    v_path = None
+    if vid and os.path.exists(vid["file_path"]):
+        v_path = vid["file_path"]
+    else:
+        g_vid = get_global_video(uid)
+        if g_vid and os.path.exists(g_vid["file_path"]):
+            v_path = g_vid["file_path"]
+
+    if not v_path:
+        return False, f"لا يوجد فيديو خاص أو موحد للحساب {acc['first_name'] or mask_phone(acc['phone'])}"
 
     cli = st["clients"].get(aid)
     call = st["calls"].get(aid)
@@ -860,21 +1037,21 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
             pass
 
     if not joined:
-        return False, "الحساب ليس عضواً في القناة"
+        return False, "الحساب ليس عضواً في القناة ولم يتمكن من الانضمام"
 
     try:
-        await call.play(chat_id, MediaStream(vid["file_path"],
+        await call.play(chat_id, MediaStream(v_path,
             audio_parameters=AudioQuality.HIGH,
             video_parameters=VideoQuality.HD_720p),
             config=GroupCallConfig(auto_start=False))
         
-        set_active_stream(uid, aid, chat_id, title, vid["file_name"])
+        set_active_stream(uid, aid, chat_id, title, os.path.basename(v_path))
 
         duration = 0
         try:
             probe = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "csv=p=0", vid["file_path"]],
+                 "-of", "csv=p=0", v_path],
                 capture_output=True, text=True, timeout=15
             )
             duration = int(float(probe.stdout.strip()))
@@ -886,7 +1063,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
 
         return True, "تم البث بنجاح"
     except Exception as ex:
-        return False, f"خطأ: {type(ex).__name__}"
+        return False, f"خطأ البث: {type(ex).__name__}"
 
 @bot.on(events.CallbackQuery(pattern=rb"^start_one_(\d+)$"))
 async def cb_start_one(e):
@@ -902,7 +1079,7 @@ async def cb_start_one(e):
     await e.answer("🚀 جاري تشغيل البث...", alert=True)
     success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
     if success:
-        await edit(e, f"✅ تم بدء البث بنجاح في: {ch['chat_title']}", buttons=back_button())
+        await edit(e, f"✅ تم بدء البث بنجاح في القناة: {ch['chat_title']}", buttons=back_button())
     else:
         await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
 
@@ -941,7 +1118,7 @@ async def cb_start_all(e):
 
     await e.answer("⚡ جاري تشغيل كافة الحسابات معاً...", alert=True)
     
-    # تنفيذ البث بالتوازي لجميع الحسابات لضمان السرعة القصوى معاً بدون تأخير
+    # تشغيل الحسابات بالتوازي وبأقصى سرعة بدون أي تأخير بينها
     tasks = [
         start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
         for acc in accs
@@ -1037,7 +1214,6 @@ async def cb_export_sessions(e):
                 pass
     
     if len(txt) > 4000:
-        # إرسال الملف إذا كان النص طويلاً
         out_path = os.path.join(DATA_DIR, "all_sessions.txt")
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(txt)
