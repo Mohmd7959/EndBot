@@ -3,3 +3,4 @@ telethon
 Numpy
 ffmpeg-python
 ffmpeg
+static_ffmpeg
