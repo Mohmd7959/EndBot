@@ -21,7 +21,7 @@ bot = TelegramClient("bot_session", API_ID, API_HASH)
 user_state = {}
 login_pending = {}
 auto_leave_tasks = {}
-user_locks = {} # قفل لمنع تداخل العمليات والأزرار
+user_locks = {}
 
 def get_user_lock(uid):
     if uid not in user_locks:
@@ -668,7 +668,6 @@ async def cb_stream_menu(e):
         acc_name = a['first_name'] if a['first_name'] else mask_phone(a['phone'])
         btns.append([Button.inline(f"تحكم بالحساب: {acc_name} [{status_txt}]", f"control_acc_{aid}".encode(), style='primary')])
     
-    # الترتيب المطلوب: زر مسح الفيديوهات والروابط فوق أزرار التحكم في البث
     btns.append([Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')])
     btns.append([Button.inline("⚡ تشغيل كل الحسابات معاً", b"start_all_streams", style='success')])
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
@@ -971,8 +970,10 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
         return False, f"الحساب ليس عضواً في القناة ولم يتمكن من الانضمام"
 
     try:
+        # تأخير ميكروسكوبي لتفادي تقطيع الصوت والفيديو وتوقف الاستريم بضغط السيرفر
+        await asyncio.sleep(0.3)
         await call.play(chat_id, MediaStream(vid["file_path"],
-            audio_parameters=AudioQuality.HIGH,
+            audio_parameters=AudioQuality.MEDIUM,
             video_parameters=VideoQuality.HD_720p),
             config=GroupCallConfig(auto_start=False))
         
@@ -1004,22 +1005,17 @@ async def cb_start_one(e):
     if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
     
-    lock = get_user_lock(uid)
-    if lock.locked():
-        return await e.answer("⚠️ توجد عملية جارية بالفعل، انتظر قليلاً...", alert=True)
-    
-    async with lock:
-        aid = int(e.pattern_match.group(1))
-        ch = get_chat(uid)
-        if not ch:
-            return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
+    aid = int(e.pattern_match.group(1))
+    ch = get_chat(uid)
+    if not ch:
+        return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
 
-        await e.answer("جاري تشغيل البث لهذا الحساب...", alert=True)
-        success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
-        if success:
-            await edit(e, f"✅ تم بدء البث بنجاح في القناة: {ch['chat_title']}", buttons=back_button())
-        else:
-            await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
+    await e.answer("جاري تشغيل البث لهذا الحساب...", alert=True)
+    success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
+    if success:
+        await edit(e, f"✅ تم بدء البث بنجاح في القناة: {ch['chat_title']}", buttons=back_button())
+    else:
+        await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
 
 @bot.on(events.CallbackQuery(pattern=rb"^stop_one_(\d+)$"))
 async def cb_stop_one(e):
@@ -1027,23 +1023,18 @@ async def cb_stop_one(e):
     if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
     
-    lock = get_user_lock(uid)
-    if lock.locked():
-        return await e.answer("⚠️ توجد عملية جارية، انتظر...", alert=True)
-
-    async with lock:
-        aid = int(e.pattern_match.group(1))
-        st = get_state(uid)
-        call = st["calls"].get(aid)
-        active = get_active_stream(uid, aid)
-        if call and active:
-            try:
-                await call.leave_call(active["chat_id"])
-            except Exception:
-                pass
-        remove_active_stream(uid, aid)
-        await edit(e, "⏹️ تم إيقاف البث لهذا الحساب بنجاح (وبقي ملف الفيديو محفوظاً).", buttons=back_button())
-        await e.answer("تم الإيقاف")
+    aid = int(e.pattern_match.group(1))
+    st = get_state(uid)
+    call = st["calls"].get(aid)
+    active = get_active_stream(uid, aid)
+    if call and active:
+        try:
+            await call.leave_call(active["chat_id"])
+        except Exception:
+            pass
+    remove_active_stream(uid, aid)
+    await edit(e, "⏹️ تم إيقاف البث لهذا الحساب بنجاح (وبقي ملف الفيديو محفوظاً).", buttons=back_button())
+    await e.answer("تم الإيقاف الفوري")
 
 @bot.on(events.CallbackQuery(data=b"start_all_streams"))
 async def cb_start_all(e):
@@ -1051,38 +1042,39 @@ async def cb_start_all(e):
     if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
     
-    lock = get_user_lock(uid)
-    if lock.locked():
-        return await e.answer("⚠️ البث الجماعي قيد التنفيذ بالفعل، انتظر حتى ينتهي...", alert=True)
+    ch = get_chat(uid)
+    if not ch:
+        return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
+    
+    accs = get_accounts(uid)
+    if not accs:
+        return await e.answer("لا توجد حسابات!", alert=True)
 
-    async with lock:
-        ch = get_chat(uid)
-        if not ch:
-            return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
-        
-        accs = get_accounts(uid)
-        if not accs:
-            return await e.answer("لا توجد حسابات!", alert=True)
+    await e.answer("⚡ جاري تشغيل كل الحسابات الآن...", alert=True)
+    
+    # تحديث النص فوراً لإتاحة استجابة الأزرار
+    btns = [
+        [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
+        [Button.inline("رجوع", b"back_main", style='primary')]
+    ]
+    await edit(e, "⚡ جاري البدء ببث كافة الحسابات بشكل متزامن... يمكنك الضغط على زر الإيقاف في أي وقت.", buttons=btns)
 
-        await e.answer("⚡ جاري تشغيل كافة الحسابات معاً بشكل متزامن...", alert=True)
-        
-        # تشغيل جميع الحسابات في نفس الوقت باستخدام asyncio.gather لضمان السرعة وعدم التأخير
-        tasks = [
-            start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
-            for acc in accs
-        ]
-        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    tasks = [
+        start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
+        for acc in accs
+    ]
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
-        results = []
-        for acc, outcome in zip(accs, outcomes):
-            acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
-            if isinstance(outcome, tuple) and outcome[0]:
-                results.append(f"حساب {acc_name}: 🟢 يعمل بنجاح")
-            else:
-                err_msg = outcome[1] if isinstance(outcome, tuple) else "خطأ غير متوقع"
-                results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
+    results = []
+    for acc, outcome in zip(accs, outcomes):
+        acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
+        if isinstance(outcome, tuple) and outcome[0]:
+            results.append(f"حساب {acc_name}: 🟢 يعمل بنجاح")
+        else:
+            err_msg = outcome[1] if isinstance(outcome, tuple) else "خطأ غير متوقع"
+            results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
 
-        await edit(e, "⚡ نتائج تشغيل الحسابات المتزامنة:\n\n" + "\n".join(results), buttons=back_button())
+    await edit(e, "⚡ نتائج تشغيل الحسابات المتزامنة:\n\n" + "\n".join(results), buttons=back_button())
 
 @bot.on(events.CallbackQuery(data=b"stop_all_streams"))
 async def cb_stop_all(e):
@@ -1090,29 +1082,24 @@ async def cb_stop_all(e):
     if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
     
-    lock = get_user_lock(uid)
-    if lock.locked():
-        return await e.answer("⚠️ عملية جارية، انتظر...", alert=True)
+    st = get_state(uid)
+    active_streams = get_all_active_streams_for_user(uid)
+    
+    async def stop_single(active):
+        aid = active["account_id"]
+        call = st["calls"].get(aid)
+        if call:
+            try:
+                await call.leave_call(active["chat_id"])
+            except Exception:
+                pass
+        remove_active_stream(uid, aid)
 
-    async with lock:
-        st = get_state(uid)
-        active_streams = get_all_active_streams_for_user(uid)
-        
-        async def stop_single(active):
-            aid = active["account_id"]
-            call = st["calls"].get(aid)
-            if call:
-                try:
-                    await call.leave_call(active["chat_id"])
-                except Exception:
-                    pass
-            remove_active_stream(uid, aid)
+    if active_streams:
+        await asyncio.gather(*(stop_single(s) for s in active_streams), return_exceptions=True)
 
-        if active_streams:
-            await asyncio.gather(*(stop_single(s) for s in active_streams), return_exceptions=True)
-
-        await edit(e, "🛑 تم إيقاف جميع البثوث النشطة وإنزال الحسابات فوراً.", buttons=back_button())
-        await e.answer("تم الإيقاف الجماعي الفوري")
+    await edit(e, "🛑 تم إيقاف جميع البثوث النشطة وإنزال الحسابات فوراً.", buttons=back_button())
+    await e.answer("تم الإيقاف الجماعي الفوري")
 
 def admin_menu():
     return [
