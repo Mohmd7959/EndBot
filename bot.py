@@ -22,6 +22,7 @@ user_state = {}
 login_pending = {}
 auto_leave_tasks = {}
 user_locks = {}
+crazy_mode_tasks = {} # مهام تشغيل الكاميرا الممتدة والمنفصلة
 
 def get_user_lock(uid):
     if uid not in user_locks:
@@ -670,7 +671,8 @@ async def cb_stream_menu(e):
     
     btns.append([Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')])
     btns.append([Button.inline("⚡ تشغيل كل الحسابات معاً", b"start_all_streams", style='success')])
-    btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
+    btns.append([Button.inline("💥 تشغيل كل الحسابات بجنون", b"start_crazy_mode", style='warning')])
+    btns.append([Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')])
     btns.append([Button.inline("رجوع", b"back_main", style='danger')])
     
     await edit(e, f"التحكم في البث:\n{chat_status}\n\nاختر الحساب للتحكم المفرد أو شغل الكل:", buttons=btns)
@@ -833,13 +835,11 @@ async def on_message(e):
         
         accs = get_accounts(uid)
         if step == "unified_video":
-            # رفع الملف الموحد وتوزيعه كفيديو خاص مستقل لكل حساب لضمان عدم حدوث تداخل أو حذف
             for a in accs:
                 acc_video_path = os.path.join(VIDEOS_DIR, f"{uid}_{a['account_id']}_{media.id}.mp4")
                 shutil.copy2(final_path, acc_video_path)
                 add_video(uid, a["account_id"], acc_video_path, final_name, actual)
         else:
-            # فيديو مخصص للحساب المحدد فقط بدون المساس بباقي حساباتك
             add_video(uid, target_aid, final_path, final_name, actual)
 
         login_pending.pop(uid, None)
@@ -965,33 +965,72 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
         return False, "الحساب ليس عضواً في المجموعة"
 
     try:
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.1)
         await call.play(chat_id, MediaStream(vid["file_path"],
             audio_parameters=AudioQuality.HIGH,
             video_parameters=VideoQuality.HD_720p),
             config=GroupCallConfig(auto_start=False))
         
         set_active_stream(uid, aid, chat_id, title, vid["id"])
-
-        duration = 0
-        try:
-            probe = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "csv=p=0", vid["file_path"]],
-                capture_output=True, text=True, timeout=15
-            )
-            duration = int(float(probe.stdout.strip()))
-        except Exception:
-            duration = 0
-
-        if duration > 0:
-            asyncio.create_task(
-                auto_leave_when_done(uid, aid, chat_id, duration)
-            )
-
         return True, "تم البث بنجاح"
     except Exception as ex:
         return False, f"خطأ البث: {type(ex).__name__}"
+
+# حلقة عمل فتح وإغلاق الكاميرا بسرعة (النمط المجنون)
+async def crazy_camera_loop(uid, accs, chat_id):
+    st = get_state(uid)
+    try:
+        while True:
+            for acc in accs:
+                call = st["calls"].get(acc["account_id"])
+                if call:
+                    try:
+                        # فتح الكاميرا وتغيير البث بشكل سريع جداً
+                        vid = get_video(uid, acc["account_id"])
+                        if vid and os.path.exists(vid["file_path"]):
+                            await call.pause(chat_id)
+                            await asyncio.sleep(0.2)
+                            await call.resume(chat_id)
+                    except Exception:
+                        pass
+            await asyncio.sleep(0.3)
+    except asyncio.CancelledError:
+        pass
+
+@bot.on(events.CallbackQuery(data=b"start_crazy_mode"))
+async def cb_start_crazy(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    
+    ch = get_chat(uid)
+    if not ch:
+        return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
+    
+    accs = get_accounts(uid)
+    if not accs:
+        return await e.answer("لا توجد حسابات!", alert=True)
+
+    await e.answer("💥 جاري تشغيل كافة الحسابات بالنمط المجنون...", alert=True)
+    
+    # 1. صعود البث أولاً
+    tasks = [
+        start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
+        for acc in accs
+    ]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    # 2. إطلاق حلقة فتح وإغلاق الكاميرا بسرعة
+    if uid in crazy_mode_tasks and not crazy_mode_tasks[uid].done():
+        crazy_mode_tasks[uid].cancel()
+    
+    crazy_mode_tasks[uid] = asyncio.create_task(crazy_camera_loop(uid, accs, ch["chat_id"]))
+
+    btns = [
+        [Button.inline("🛑 إيقاف النمط المجنون والنزول فوراً", b"stop_all_streams", style='danger')],
+        [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
+    ]
+    await edit(e, "💥 <b>تم تفعيل نمط التشغيل المجنون!</b>\n\nيتم فتح وإغلاق الكاميرات بسرعة عالية جداً لجميع الحسابات حالياً.", buttons=btns, parse_mode="html")
 
 @bot.on(events.CallbackQuery(pattern=rb"^start_one_(\d+)$"))
 async def cb_start_one(e):
@@ -1046,12 +1085,11 @@ async def cb_start_all(e):
 
     await e.answer("⚡ جاري تشغيل كل الحسابات معاً...", alert=True)
     
-    # واجهة فورية تحتوي على زر نزول وإيقاف طوارئ يعمل في أي وقت
     emergency_btns = [
         [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
         [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
     ]
-    await edit(e, "⚡ جاري الصعود الجماعي للبث... زر النزول والإيقاف يعمل فوراً في الأسفل:", buttons=emergency_btns)
+    await edit(e, "⚡ جاري الصعود الجماعي للبث... يمكنك الضغط على زر الإيقاف في أي وقت:", buttons=emergency_btns)
 
     tasks = [
         start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
@@ -1076,6 +1114,10 @@ async def cb_stop_all(e):
     if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
     
+    # إلغاء النمط المجنون أولاً إن كان يعمل
+    if uid in crazy_mode_tasks and not crazy_mode_tasks[uid].done():
+        crazy_mode_tasks[uid].cancel()
+
     st = get_state(uid)
     active_streams = get_all_active_streams_for_user(uid)
     
@@ -1092,7 +1134,7 @@ async def cb_stop_all(e):
     if active_streams:
         await asyncio.gather(*(stop_single(s) for s in active_streams), return_exceptions=True)
 
-    await edit(e, "🛑 تم إيقاف جميع البثوث وإنزال كافة الحسابات فوراً بنجاح.", buttons=back_button())
+    await edit(e, "🛑 تم إيقاف جميع البثوث وإنزال كافة الحسابات وإغلاق الكاميرات فوراً بنجاح.", buttons=back_button())
     await e.answer("تم النزول الجماعي الفوري")
 
 def admin_menu():
