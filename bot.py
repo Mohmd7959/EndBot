@@ -951,7 +951,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link, use_cam
         return False, "الحساب ليس عضواً في المجموعة"
 
     try:
-        # تم تصحيح طريقة تمرير جودة ودقة الفيديو لتجنب خطأ ImportError تماماً
+        # تم تصحيح تمرير معايير الفيديو والصوت داخل MediaStream بشكل متوافق تماماً مع PyTgCalls الحديثة
         await call.play(
             chat_id, 
             MediaStream(
