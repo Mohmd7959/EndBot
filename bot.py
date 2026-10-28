@@ -791,15 +791,6 @@ async def on_message(e):
         if size > 500 * 1024 * 1024:
             return await respond(e, "حجم الفيديو يتجاوز 500MB")
 
-        if step == "video":
-            old = get_video(uid, target_aid)
-            if old and old.get("file_path") and os.path.exists(old["file_path"]):
-                try:
-                    os.remove(old["file_path"])
-                except Exception:
-                    pass
-            remove_video(uid, target_aid)
-
         temp_path = os.path.join(VIDEOS_DIR, f"temp_{uid}_{media.id}.mp4")
         final_name = f"{uid}_{media.id}.mp4"
         final_path = os.path.join(VIDEOS_DIR, final_name)
@@ -842,9 +833,13 @@ async def on_message(e):
         
         accs = get_accounts(uid)
         if step == "unified_video":
+            # رفع الملف الموحد وتوزيعه كفيديو خاص مستقل لكل حساب لضمان عدم حدوث تداخل أو حذف
             for a in accs:
-                add_video(uid, a["account_id"], final_path, final_name, actual)
+                acc_video_path = os.path.join(VIDEOS_DIR, f"{uid}_{a['account_id']}_{media.id}.mp4")
+                shutil.copy2(final_path, acc_video_path)
+                add_video(uid, a["account_id"], acc_video_path, final_name, actual)
         else:
+            # فيديو مخصص للحساب المحدد فقط بدون المساس بباقي حساباتك
             add_video(uid, target_aid, final_path, final_name, actual)
 
         login_pending.pop(uid, None)
@@ -852,7 +847,7 @@ async def on_message(e):
             await msg.delete()
         except Exception:
             pass
-        await respond(e, f"تم حفظ الفيديو بنجاح!\nالحجم: {format_size(actual)}", buttons=back_button())
+        await respond(e, f"تم حفظ وتخصيص الفيديو بنجاح!\nالحجم: {format_size(actual)}", buttons=back_button())
         return
 
     if step == "chat":
@@ -923,7 +918,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
     
     vid = get_video(uid, aid)
     if not vid or not os.path.exists(vid["file_path"]):
-        return False, f"لا يوجد فيديو مخصص للحساب {acc['first_name'] or mask_phone(acc['phone'])}"
+        return False, f"لا يوجد فيديو مرفق للحساب"
 
     cli = st["clients"].get(aid)
     call = st["calls"].get(aid)
@@ -938,7 +933,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
             st["clients"][aid] = cli
             st["calls"][aid] = call
         except Exception:
-            return False, "فشل تشغيل عميل التيليجرام للحساب"
+            return False, "فشل تشغيل عميل التيليجرام"
 
     joined = False
     try:
@@ -967,13 +962,12 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
             pass
 
     if not joined:
-        return False, f"الحساب ليس عضواً في القناة ولم يتمكن من الانضمام"
+        return False, "الحساب ليس عضواً في المجموعة"
 
     try:
-        # تأخير ميكروسكوبي لتفادي تقطيع الصوت والفيديو وتوقف الاستريم بضغط السيرفر
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.2)
         await call.play(chat_id, MediaStream(vid["file_path"],
-            audio_parameters=AudioQuality.MEDIUM,
+            audio_parameters=AudioQuality.HIGH,
             video_parameters=VideoQuality.HD_720p),
             config=GroupCallConfig(auto_start=False))
         
@@ -1010,10 +1004,10 @@ async def cb_start_one(e):
     if not ch:
         return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
 
-    await e.answer("جاري تشغيل البث لهذا الحساب...", alert=True)
+    await e.answer("جاري تشغيل البث...", alert=True)
     success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
     if success:
-        await edit(e, f"✅ تم بدء البث بنجاح في القناة: {ch['chat_title']}", buttons=back_button())
+        await edit(e, f"✅ تم بدء البث بنجاح في: {ch['chat_title']}", buttons=back_button())
     else:
         await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
 
@@ -1033,8 +1027,8 @@ async def cb_stop_one(e):
         except Exception:
             pass
     remove_active_stream(uid, aid)
-    await edit(e, "⏹️ تم إيقاف البث لهذا الحساب بنجاح (وبقي ملف الفيديو محفوظاً).", buttons=back_button())
-    await e.answer("تم الإيقاف الفوري")
+    await edit(e, "⏹️ تم إيقاف البث ونزول الحساب فوراً.", buttons=back_button())
+    await e.answer("تم النزول والإيقاف")
 
 @bot.on(events.CallbackQuery(data=b"start_all_streams"))
 async def cb_start_all(e):
@@ -1050,14 +1044,14 @@ async def cb_start_all(e):
     if not accs:
         return await e.answer("لا توجد حسابات!", alert=True)
 
-    await e.answer("⚡ جاري تشغيل كل الحسابات الآن...", alert=True)
+    await e.answer("⚡ جاري تشغيل كل الحسابات معاً...", alert=True)
     
-    # تحديث النص فوراً لإتاحة استجابة الأزرار
-    btns = [
+    # واجهة فورية تحتوي على زر نزول وإيقاف طوارئ يعمل في أي وقت
+    emergency_btns = [
         [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
-        [Button.inline("رجوع", b"back_main", style='primary')]
+        [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
     ]
-    await edit(e, "⚡ جاري البدء ببث كافة الحسابات بشكل متزامن... يمكنك الضغط على زر الإيقاف في أي وقت.", buttons=btns)
+    await edit(e, "⚡ جاري الصعود الجماعي للبث... زر النزول والإيقاف يعمل فوراً في الأسفل:", buttons=emergency_btns)
 
     tasks = [
         start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
@@ -1074,7 +1068,7 @@ async def cb_start_all(e):
             err_msg = outcome[1] if isinstance(outcome, tuple) else "خطأ غير متوقع"
             results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
 
-    await edit(e, "⚡ نتائج تشغيل الحسابات المتزامنة:\n\n" + "\n".join(results), buttons=back_button())
+    await edit(e, "⚡ نتائج تشغيل الحسابات:\n\n" + "\n".join(results), buttons=back_button())
 
 @bot.on(events.CallbackQuery(data=b"stop_all_streams"))
 async def cb_stop_all(e):
@@ -1098,8 +1092,8 @@ async def cb_stop_all(e):
     if active_streams:
         await asyncio.gather(*(stop_single(s) for s in active_streams), return_exceptions=True)
 
-    await edit(e, "🛑 تم إيقاف جميع البثوث النشطة وإنزال الحسابات فوراً.", buttons=back_button())
-    await e.answer("تم الإيقاف الجماعي الفوري")
+    await edit(e, "🛑 تم إيقاف جميع البثوث وإنزال كافة الحسابات فوراً بنجاح.", buttons=back_button())
+    await e.answer("تم النزول الجماعي الفوري")
 
 def admin_menu():
     return [
