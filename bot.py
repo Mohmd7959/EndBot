@@ -654,10 +654,7 @@ async def cb_stream_menu(e):
         acc_name = a['first_name'] if a['first_name'] else mask_phone(a['phone'])
         btns.append([Button.inline(f"تحكم بالحساب: {acc_name} [{status_txt}]", f"control_acc_{aid}".encode(), style='primary')])
     
-    # الزر الأول: مسح الفيديوهات والروابط (موضع مرتب بدقة فوق أزرار البث)
     btns.append([Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')])
-    
-    # الأزرار الجديدة المنفصلة لتشغيل الكاميرا الأمامية عن التشغيل الاعتيادي
     btns.append([Button.inline("⚡ تشغيل كل الحسابات (كاميرا أمامية + صوت)", b"start_all_cam", style='success')])
     btns.append([Button.inline("🎬 تشغيل اعتيادي (فيديو بدون كاميرا)", b"start_all_normal", style='primary')])
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
@@ -954,13 +951,13 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link, use_cam
         return False, "الحساب ليس عضواً في المجموعة"
 
     try:
-        from pytgcalls.types import VideoParameters
+        # تم تصحيح طريقة تمرير جودة ودقة الفيديو لتجنب خطأ ImportError تماماً
         await call.play(
             chat_id, 
             MediaStream(
                 vid["file_path"],
                 audio_parameters=AudioQuality.HIGH,
-                video_parameters=VideoParameters(quality=VideoQuality.HD_720p)
+                video_parameters=VideoQuality.HD_720p
             ),
             config=GroupCallConfig(
                 auto_start=False,
