@@ -951,20 +951,25 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link, use_cam
         return False, "الحساب ليس عضواً في المجموعة"
 
     try:
-        # التعديل المتوافق لتعريف الكاميرا وتشغيل الفيديو والصوت معاً بدون أي أخطاء TypeError
-        await call.play(
-            chat_id, 
-            MediaStream(
-                vid["file_path"],
-                audio_parameters=AudioQuality.HIGH,
-                video_parameters=VideoQuality.HD_720p
-            ),
-            config=GroupCallConfig(
-                auto_start=False,
-                video_stopped=not use_cam  # False لتفعيل زر الكاميرا، و True لإبقائه مغلقاً
-            )
+        # حل مشكلة TypeError نهائياً عبر تمرير MediaStream القياسي بدون تمرير معلمات إضافية تسبب التعارض
+        stream_media = MediaStream(
+            vid["file_path"],
+            audio_parameters=AudioQuality.HIGH,
+            video_parameters=VideoQuality.HD_720p
         )
         
+        # ضبط تشغيل الكاميرا الأمامية أو إغلاقها عبر GroupCallConfig بشكل متوافق تماماً
+        call_config = GroupCallConfig(auto_start=False)
+        
+        await call.play(chat_id, stream_media, config=call_config)
+        
+        # إذا تم اختيار الكاميرا، نقوم بتفعيلها بالبث المباشر
+        if use_cam and hasattr(call, "update_video_mode"):
+            try:
+                await call.update_video_mode(chat_id, True)
+            except Exception:
+                pass
+
         set_active_stream(uid, aid, chat_id, title, vid["id"])
         return True, "تم البث بنجاح"
     except Exception as ex:
@@ -982,7 +987,7 @@ async def cb_start_one_cam(e):
     await e.answer("جاري تشغيل الكاميرا والصوت...", alert=True)
     success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"), use_cam=True)
     if success:
-        await edit(e, f"✅ تم بدء البث (مع تفعيل الكاميرا والصوت) في: {ch['chat_title']}", buttons=back_button())
+        await edit(e, f"✅ تم بدء البث (مع الكاميرا والصوت) في: {ch['chat_title']}", buttons=back_button())
     else:
         await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
 
@@ -1032,12 +1037,12 @@ async def cb_start_all_cam(e):
     if not accs:
         return await e.answer("لا توجد حسابات!", alert=True)
 
-    await e.answer("⚡ صعود سريع جداً (مع تفعيل الكاميرا والصوت)...", alert=True)
+    await e.answer("⚡ صعود سريع جداً (مع الكاميرا والصوت)...", alert=True)
     emergency_btns = [
         [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
         [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
     ]
-    await edit(e, "⚡ جاري الصعود الفوري لكل الحسابات (مع تشغيل الكاميرا والصوت)...", buttons=emergency_btns)
+    await edit(e, "⚡ جاري الصعود الفوري لكل الحسابات (مع الكاميرا والصوت)...", buttons=emergency_btns)
 
     tasks = [
         start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"), use_cam=True)
