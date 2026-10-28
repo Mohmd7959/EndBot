@@ -655,8 +655,8 @@ async def cb_stream_menu(e):
         btns.append([Button.inline(f"تحكم بالحساب: {acc_name} [{status_txt}]", f"control_acc_{aid}".encode(), style='primary')])
     
     btns.append([Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')])
-    btns.append([Button.inline("⚡ تشغيل كل الحسابات (كاميرا أمامية + صوت)", b"start_all_cam", style='success')])
-    btns.append([Button.inline("🎬 تشغيل اعتيادي (فيديو بدون كاميرا)", b"start_all_normal", style='primary')])
+    btns.append([Button.inline("⚡ تشغيل كل الحسابات (كاميرا + صوت)", b"start_all_cam", style='success')])
+    btns.append([Button.inline("🎬 تشغيل اعتيادي (بدون كاميرا)", b"start_all_normal", style='primary')])
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
     btns.append([Button.inline("رجوع", b"back_main", style='danger')])
     
@@ -681,7 +681,7 @@ async def cb_control_acc(e):
     acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
 
     btns = [
-        [Button.inline("▶️ بدء البث (كاميرا أمامية + صوت)", f"start_one_cam_{aid}".encode(), style='success')],
+        [Button.inline("▶️ بدء البث (كاميرا + صوت)", f"start_one_cam_{aid}".encode(), style='success')],
         [Button.inline("▶️ بدء تشغيل اعتيادي (بدون كاميرا)", f"start_one_norm_{aid}".encode(), style='primary')],
         [Button.inline("⏹️ إيقاف البث لهذا الحساب", f"stop_one_{aid}".encode(), style='danger')],
         [Button.inline("رجوع للقائمة", b"stream_menu", style='primary')]
@@ -951,7 +951,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link, use_cam
         return False, "الحساب ليس عضواً في المجموعة"
 
     try:
-        # تم تصحيح تمرير معايير الفيديو والصوت داخل MediaStream بشكل متوافق تماماً مع PyTgCalls الحديثة
+        # التعديل المتوافق لتعريف الكاميرا وتشغيل الفيديو والصوت معاً بدون أي أخطاء TypeError
         await call.play(
             chat_id, 
             MediaStream(
@@ -961,7 +961,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link, use_cam
             ),
             config=GroupCallConfig(
                 auto_start=False,
-                is_video=use_cam
+                video_stopped=not use_cam  # False لتفعيل زر الكاميرا، و True لإبقائه مغلقاً
             )
         )
         
@@ -979,10 +979,10 @@ async def cb_start_one_cam(e):
     ch = get_chat(uid)
     if not ch:
         return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
-    await e.answer("جاري تشغيل الكاميرا الأمامية والصوت...", alert=True)
+    await e.answer("جاري تشغيل الكاميرا والصوت...", alert=True)
     success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"), use_cam=True)
     if success:
-        await edit(e, f"✅ تم بدء البث بكاميرا وصوت في: {ch['chat_title']}", buttons=back_button())
+        await edit(e, f"✅ تم بدء البث (مع تفعيل الكاميرا والصوت) في: {ch['chat_title']}", buttons=back_button())
     else:
         await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
 
@@ -1032,12 +1032,12 @@ async def cb_start_all_cam(e):
     if not accs:
         return await e.answer("لا توجد حسابات!", alert=True)
 
-    await e.answer("⚡ صعود سريع جداً (كاميرا أمامية + صوت)...", alert=True)
+    await e.answer("⚡ صعود سريع جداً (مع تفعيل الكاميرا والصوت)...", alert=True)
     emergency_btns = [
         [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
         [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
     ]
-    await edit(e, "⚡ جاري الصعود الفوري لكل الحسابات بكاميرا وصوت...", buttons=emergency_btns)
+    await edit(e, "⚡ جاري الصعود الفوري لكل الحسابات (مع تشغيل الكاميرا والصوت)...", buttons=emergency_btns)
 
     tasks = [
         start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"), use_cam=True)
@@ -1049,7 +1049,7 @@ async def cb_start_all_cam(e):
     for acc, outcome in zip(accs, outcomes):
         acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
         if isinstance(outcome, tuple) and outcome[0]:
-            results.append(f"حساب {acc_name}: 🟢 صعد بكاميرا وصوت بنجاح")
+            results.append(f"حساب {acc_name}: 🟢 صعد بالكاميرا والصوت بنجاح")
         else:
             err_msg = outcome[1] if isinstance(outcome, tuple) else "خطأ غير متوقع"
             results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
