@@ -665,7 +665,7 @@ async def cb_stream_menu(e):
         btns.append([Button.inline(f"تحكم بالحساب: {acc_name} [{status_txt}]", f"control_acc_{aid}".encode(), style='primary')])
     
     btns.append([Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')])
-    btns.append([Button.inline("⚡ تشغيل كل الحسابات معا (VC Player)", b"start_all_normal", style='success')])
+    btns.append([Button.inline("⚡ تشغيل كل الحسابات معا (متزامن آمن)", b"start_all_normal", style='success')])
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
     btns.append([Button.inline("رجوع", b"back_main", style='danger')])
     
@@ -1041,29 +1041,38 @@ async def cb_start_all_normal(e):
     if not accs:
         return await e.answer("لا توجد حسابات!", alert=True)
 
-    await e.answer("⚡ تشغيل الحسابات بنظام VC Player الاحترافي (0.3s)...", alert=True)
+    await e.answer("⚡ تشغيل الحسابات بنظام الدفعات المتوازية الآمنة...", alert=True)
     emergency_btns = [
         [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
         [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
     ]
-    await edit(e, "⚡ جاري الصعود الآمن والمستقر لكافة الحسابات (بدون أي تعليق أو ضغط على السيرفر)...", buttons=emergency_btns)
+    await edit(e, "⚡ جاري الصعود الجماعي المتزامن لكافة الحسابات بالصوت والفيديو بدون أي ضغط أو تجميد...", buttons=emergency_btns)
 
-    # طريقة الـ VC Player: تأخير طفيف جداً ومنتظم (0.3 ثانية) لمنع انهيار أو تعليق الحسابات معاً
+    # نظام الدفعات المتوازية (Batched Concurrency): تشغيل الحسابات دفعة واحدة مع تقسيمها على دفعات صغيرة سريعة لمنع حظر وسائط تيليجرام
+    batch_size = 3
     outcomes = []
-    for acc in accs:
-        res = await start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
-        outcomes.append((acc, res))
-        await asyncio.sleep(0.3)
+    for i in range(0, len(accs), batch_size):
+        batch = accs[i:i + batch_size]
+        tasks = [
+            start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
+            for acc in batch
+        ]
+        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+        for acc, res in zip(batch, batch_results):
+            outcomes.append((acc, res))
+        if i + batch_size < len(accs):
+            await asyncio.sleep(0.15) # فاصل ميكروي خفيف جداً بين الدفعات لمنع تعليق الحسابات الأخيرة
 
     results = []
-    for acc, (success, err_msg) in outcomes:
+    for acc, outcome in outcomes:
         acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
-        if success:
+        if isinstance(outcome, tuple) and outcome[0]:
             results.append(f"حساب {acc_name}: 🟢 يعمل بنجاح (مع الصوت والفيديو)")
         else:
+            err_msg = outcome[1] if isinstance(outcome, tuple) else "خطأ غير متوقع"
             results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
 
-    await edit(e, "⚡ نتائج التشغيل الجماعي الآمن:\n\n" + "\n".join(results), buttons=back_button())
+    await edit(e, "⚡ نتائج التشغيل الجماعي المتزامن الآمن:\n\n" + "\n".join(results), buttons=back_button())
 
 @bot.on(events.CallbackQuery(data=b"stop_all_streams"))
 async def cb_stop_all(e):
