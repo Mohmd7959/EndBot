@@ -1,5 +1,3 @@
-import static_ffmpeg
-static_ffmpeg.add_paths()
 import os, asyncio, sqlite3, subprocess, shutil, re
 from datetime import datetime, timedelta
 from telethon import TelegramClient, events
@@ -21,7 +19,6 @@ bot = TelegramClient("bot_session", API_ID, API_HASH)
 user_state = {}
 login_pending = {}
 auto_leave_tasks = {}
-crazy_cam_tasks = {}
 
 def get_state(uid):
     if uid not in user_state:
@@ -666,8 +663,7 @@ async def cb_stream_menu(e):
         btns.append([Button.inline(f"تحكم بالحساب: {acc_name} [{status_txt}]", f"control_acc_{aid}".encode(), style='primary')])
     
     btns.append([Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')])
-    btns.append([Button.inline("⚡ تشغيل كل الحسابات معا", b"start_all_normal", style='success')]) # الزر الأول المطلوب
-    btns.append([Button.inline("🔥 تجربة جنون الحسابات", b"crazy_loop_start", style='success')]) # الزر الثالث المطلوب (جنون الحسابات والكاميرا المزدوجة)
+    btns.append([Button.inline("⚡ تشغيل كل الحسابات معا", b"start_all_normal", style='success')])
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
     btns.append([Button.inline("رجوع", b"back_main", style='danger')])
     
@@ -793,7 +789,7 @@ async def on_message(e):
         final_name = f"{uid}_{media.id}.mp4"
         final_path = os.path.join(VIDEOS_DIR, final_name)
 
-        msg = await respond(e, "جاري تحميل ومعالجة الفيديو أو الصوت...")
+        msg = await respond(e, "جاري تحميل ومعالجة الفيديو والصوت وضبط الترميز...")
         try:
             await e.download_media(file=temp_path)
         except Exception as ex:
@@ -804,10 +800,11 @@ async def on_message(e):
             return await respond(e, f"فشل التحميل: {type(ex).__name__}")
 
         try:
+            # تعديل ترميز الصوت والفيديو ليعمل الصوت بوضوح في المكالمات
             subprocess.run(
                 ["ffmpeg", "-y", "-i", temp_path,
                  "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                 "-c:a", "aac", "-b:a", "128k",
+                 "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
                  "-movflags", "+faststart", final_path],
                 capture_output=True, text=True, timeout=900
             )
@@ -843,7 +840,7 @@ async def on_message(e):
             await msg.delete()
         except Exception:
             pass
-        await respond(e, f"تم حفظ وتخصيص الملف بنجاح!\nالحجم: {format_size(actual)}", buttons=back_button())
+        await respond(e, f"تم حفظ وتخصيص الفيديو والصوت بنجاح!\nالحجم: {format_size(actual)}", buttons=back_button())
         return
 
     if step == "chat":
@@ -914,7 +911,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
     
     vid = get_video(uid, aid)
     if not vid or not os.path.exists(vid["file_path"]):
-        return False, "لا يوجد ملف مرفق للحساب"
+        return False, "لا يوجد فيديو مرفق للحساب"
 
     cli = st["clients"].get(aid)
     call = st["calls"].get(aid)
@@ -961,6 +958,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
         return False, "الحساب ليس عضواً في المجموعة"
 
     try:
+        # ضبط البث بشعاع صوت وفيديو مدمج عالٍ الجودة
         stream_media = MediaStream(
             vid["file_path"],
             audio_parameters=AudioQuality.HIGH,
@@ -972,6 +970,7 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
         
         set_active_stream(uid, aid, chat_id, title, vid["id"])
         
+        # مؤقت تلقائي دقيق يضمن نزول الحساب من الاتصال فور انتهاء مدة الفيديو
         duration = get_video_duration(vid["file_path"])
         if duration > 0:
             if aid in auto_leave_tasks:
@@ -994,41 +993,6 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
     except Exception as ex:
         return False, f"خطأ البث: {type(ex).__name__}"
 
-async def start_crazy_loop_for_account(uid, aid, chat_id, title, saved_link):
-    success, msg = await start_stream_for_account(uid, aid, chat_id, title, saved_link)
-    if not success:
-        return success, msg
-
-    st = get_state(uid)
-    call = st["calls"].get(aid)
-    
-    if aid in crazy_cam_tasks:
-        crazy_cam_tasks[aid].cancel()
-
-    async def crazy_cam_loop():
-        try:
-            # محاكاة تأثير الكاميرا المزدوجة والجنون الشفاف (فتح وإغلاق وتبديل سريع للكاميرات مع بقاء الوسائط تعمل)
-            while get_active_stream(uid, aid):
-                await asyncio.sleep(2)
-                if hasattr(call, "update_video_mode"):
-                    try:
-                        await call.update_video_mode(chat_id, True)
-                    except Exception:
-                        pass
-                await asyncio.sleep(2)
-                if hasattr(call, "update_video_mode"):
-                    try:
-                        await call.update_video_mode(chat_id, False)
-                    except Exception:
-                        pass
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-
-    crazy_cam_tasks[aid] = asyncio.create_task(crazy_cam_loop())
-    return True, "تم البث بنجاح مع جنون الكاميرا المزدوجة"
-
 @bot.on(events.CallbackQuery(pattern=rb"^start_one_norm_(\d+)$"))
 async def cb_start_one_norm(e):
     uid = e.sender_id
@@ -1038,10 +1002,10 @@ async def cb_start_one_norm(e):
     ch = get_chat(uid)
     if not ch:
         return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
-    await e.answer("جاري تشغيل البث...", alert=True)
+    await e.answer("جاري تشغيل البث بالفيديو والصوت...", alert=True)
     success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
     if success:
-        await edit(e, f"✅ تم بدء التشغيل في: {ch['chat_title']} (سينزل تلقائياً فور انتهاء الملف)", buttons=back_button())
+        await edit(e, f"✅ تم بدء التشغيل في: {ch['chat_title']} (سينزل تلقائياً فور انتهاء الفيديو)", buttons=back_button())
     else:
         await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
 
@@ -1062,48 +1026,9 @@ async def cb_stop_one(e):
     if aid in auto_leave_tasks:
         auto_leave_tasks[aid].cancel()
         auto_leave_tasks.pop(aid, None)
-    if aid in crazy_cam_tasks:
-        crazy_cam_tasks[aid].cancel()
-        crazy_cam_tasks.pop(aid, None)
     remove_active_stream(uid, aid)
     await edit(e, "⏹️ تم إيقاف البث ونزول الحساب فوراً.", buttons=back_button())
     await e.answer("تم النزول والإيقاف")
-
-@bot.on(events.CallbackQuery(data=b"crazy_loop_start"))
-async def cb_crazy_loop_start(e):
-    uid = e.sender_id
-    if not is_subscriber(uid):
-        return await e.answer("غير مصرح", alert=True)
-    ch = get_chat(uid)
-    if not ch:
-        return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
-    accs = get_accounts(uid)
-    if not accs:
-        return await e.answer("لا توجد حسابات!", alert=True)
-
-    await e.answer("🔥 تجربة جنون الحسابات والكاميرا المزدوجة...", alert=True)
-    emergency_btns = [
-        [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
-        [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
-    ]
-    await edit(e, "🔥 جاري تشغيل كافة الحسابات مع الملفات المرفقة وتفعيل وضع الكاميرا المزدوجة والجنون الشفاف...", buttons=emergency_btns)
-
-    tasks = [
-        start_crazy_loop_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
-        for acc in accs
-    ]
-    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
-
-    results = []
-    for acc, outcome in zip(accs, outcomes):
-        acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
-        if isinstance(outcome, tuple) and outcome[0]:
-            results.append(f"حساب {acc_name}: 🟢 يعمل مع جنون الكاميرا المزدوجة بنجاح")
-        else:
-            err_msg = outcome[1] if isinstance(outcome, tuple) else "خطأ غير متوقع"
-            results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
-
-    await edit(e, "🔥 نتائج جنون الحسابات والكاميرا المزدوجة:\n\n" + "\n".join(results) + "\n\n(سينزل كل حساب تلقائياً فور انتهاء الملف المرفق)", buttons=back_button())
 
 @bot.on(events.CallbackQuery(data=b"start_all_normal"))
 async def cb_start_all_normal(e):
@@ -1122,7 +1047,7 @@ async def cb_start_all_normal(e):
         [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
         [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
     ]
-    await edit(e, "⚡ جاري التشغيل الجماعي العادي لكل الحسابات بالملفات المرفقة...", buttons=emergency_btns)
+    await edit(e, "⚡ جاري التشغيل الجماعي لكل الحسابات (فيديو + صوت) والنزول التلقائي فور انتهاء الفيديو...", buttons=emergency_btns)
 
     tasks = [
         start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
@@ -1134,7 +1059,7 @@ async def cb_start_all_normal(e):
     for acc, outcome in zip(accs, outcomes):
         acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
         if isinstance(outcome, tuple) and outcome[0]:
-            results.append(f"حساب {acc_name}: 🟢 يعمل بنجاح")
+            results.append(f"حساب {acc_name}: 🟢 يعمل بنجاح (مع الصوت والفيديو)")
         else:
             err_msg = outcome[1] if isinstance(outcome, tuple) else "خطأ غير متوقع"
             results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
@@ -1161,9 +1086,6 @@ async def cb_stop_all(e):
         if aid in auto_leave_tasks:
             auto_leave_tasks[aid].cancel()
             auto_leave_tasks.pop(aid, None)
-        if aid in crazy_cam_tasks:
-            crazy_cam_tasks[aid].cancel()
-            crazy_cam_tasks.pop(aid, None)
         remove_active_stream(uid, aid)
 
     if active_streams:
