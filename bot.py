@@ -385,9 +385,37 @@ MAIN_TEXT = "اهلا بك في بوت كام - إدارة البث المتعد
 async def resolve_chat(uid, link):
     link = link.strip()
     st = get_state(uid)
-    if not st["clients"]:
-        return None, "اضف حساب اولاً", None
-    cli = list(st["clients"].values())[0]
+    
+    # الحل الجذري لمشكلة "اضف حساب أولاً": إذا كانت الذاكرة المؤقتة فارغة، نقوم بجلب أول حساب من قاعدة البيانات وإحيائه تلقائياً!
+    cli = None
+    if st["clients"]:
+        cli = list(st["clients"].values())[0]
+    else:
+        accs = get_accounts(uid)
+        if not accs:
+            return None, "اضف حساب اولاً", None
+        acc = accs[0]
+        aid = acc["account_id"]
+        sfile = acc["session_file"]
+        if sfile and os.path.exists(sfile):
+            try:
+                with open(sfile, "r", encoding="utf-8") as f:
+                    sstr = f.read().strip()
+                cli = TelegramClient(StringSession(sstr), API_ID, API_HASH)
+                await cli.connect()
+                if await cli.is_user_authorized():
+                    st["clients"][aid] = cli
+                    call = PyTgCalls(cli)
+                    try:
+                        await call.start()
+                    except Exception:
+                        pass
+                    st["calls"][aid] = call
+            except Exception:
+                pass
+    
+    if not cli:
+        return None, "تعذر تشغيل العميل، أعد إضافة الحساب", None
 
     try:
         cid = int(link)
@@ -665,7 +693,7 @@ async def cb_stream_menu(e):
         btns.append([Button.inline(f"تحكم بالحساب: {acc_name} [{status_txt}]", f"control_acc_{aid}".encode(), style='primary')])
     
     btns.append([Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')])
-    btns.append([Button.inline("⚡ تشغيل فوري للجميع (صوت محسّن)", b"start_all_normal", style='success')])
+    btns.append([Button.inline("⚡ تشغيل فوري للجميع (صوت مستقر)", b"start_all_normal", style='success')])
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
     btns.append([Button.inline("رجوع", b"back_main", style='danger')])
     
@@ -791,7 +819,7 @@ async def on_message(e):
         final_name = f"{uid}_{media.id}.mp4"
         final_path = os.path.join(VIDEOS_DIR, final_name)
 
-        msg = await respond(e, "جاري معالجة الفيديو وضبط قنوات الصوت الخفيفة للمتعدد...")
+        msg = await respond(e, "جاري معالجة الفيديو وضبط الصوت الجماعي المستقر...")
         try:
             await e.download_media(file=temp_path)
         except Exception as ex:
@@ -802,11 +830,11 @@ async def on_message(e):
             return await respond(e, f"فشل التحميل: {type(ex).__name__}")
 
         try:
-            # معالجة مخصصة: خفض معدل البت الصوتي إلى 96k وتوحيد التردد لمنع إثقال السيرفر عند فتح عدة حسابات معاً
+            # ضبط الصوت بتردد منخفض ومستقر (Mono / 64k) لمنع تداخل القنوات الصوتية للـ 6 حسابات معاً
             subprocess.run(
                 ["ffmpeg", "-y", "-i", temp_path,
                  "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                 "-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2",
+                 "-c:a", "aac", "-b:a", "64k", "-ar", "22050", "-ac", "1",
                  "-movflags", "+faststart", final_path],
                 capture_output=True, text=True, timeout=900
             )
@@ -960,10 +988,10 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
         return False, "الحساب ليس عضواً في المجموعة"
 
     try:
-        # ضبط وسائط الصوت والفيديو بجودة عالية ولكن باستهلاك متوازن ومستقر لمنع ضغط السيرفر أثناء التشغيل الجماعي
+        # ضبط وسائط الصوت والصيديو بجودة مستقرة ومخفضة الضغط لمنع انهيار الـ 6 حسابات معاً
         stream_media = MediaStream(
             vid["file_path"],
-            audio_parameters=AudioQuality.STUDIO,
+            audio_parameters=AudioQuality.HIGH,
             video_parameters=VideoQuality.HD_720p
         )
         
@@ -1043,14 +1071,13 @@ async def cb_start_all_normal(e):
     if not accs:
         return await e.answer("لا توجد حسابات!", alert=True)
 
-    await e.answer("⚡ تشغيل فوري لكافة الحسابات معاً (صوت وفيديو)...", alert=True)
+    await e.answer("⚡ تشغيل فوري لكافة الحسابات معاً...", alert=True)
     emergency_btns = [
         [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
         [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
     ]
-    await edit(e, "⚡ جاري الصعود الفوري والمتزامن بالكامل (مع تفعيل الصوت والفيديو بسلاسة تامة)...", buttons=emergency_btns)
+    await edit(e, "⚡ جاري الصعود الفوري المتزامن لجميع الحسابات بالصوت والفيديو...", buttons=emergency_btns)
 
-    # الصعود الفوري المتزامن بالكامل (Concurrent) باستخدام asyncio.gather لكي تصعد الحسابات كلها بنفس اللحظة وبدون تأخير
     tasks = [
         start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
         for acc in accs
