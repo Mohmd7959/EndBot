@@ -800,7 +800,6 @@ async def on_message(e):
             return await respond(e, f"فشل التحميل: {type(ex).__name__}")
 
         try:
-            # تعديل ترميز الصوت والفيديو ليعمل الصوت بوضوح في المكالمات
             subprocess.run(
                 ["ffmpeg", "-y", "-i", temp_path,
                  "-c:v", "libx264", "-preset", "fast", "-crf", "23",
@@ -958,7 +957,6 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
         return False, "الحساب ليس عضواً في المجموعة"
 
     try:
-        # ضبط البث بشعاع صوت وفيديو مدمج عالٍ الجودة
         stream_media = MediaStream(
             vid["file_path"],
             audio_parameters=AudioQuality.HIGH,
@@ -970,7 +968,6 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
         
         set_active_stream(uid, aid, chat_id, title, vid["id"])
         
-        # مؤقت تلقائي دقيق يضمن نزول الحساب من الاتصال فور انتهاء مدة الفيديو
         duration = get_video_duration(vid["file_path"])
         if duration > 0:
             if aid in auto_leave_tasks:
@@ -1042,26 +1039,26 @@ async def cb_start_all_normal(e):
     if not accs:
         return await e.answer("لا توجد حسابات!", alert=True)
 
-    await e.answer("⚡ تشغيل كافة الحسابات معا...", alert=True)
+    await e.answer("⚡ تشغيل الحسابات بتأخير VC Player (0.6s)...", alert=True)
     emergency_btns = [
         [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
         [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
     ]
-    await edit(e, "⚡ جاري التشغيل الجماعي لكل الحسابات (فيديو + صوت) والنزول التلقائي فور انتهاء الفيديو...", buttons=emergency_btns)
+    await edit(e, "⚡ جاري صعود الحسابات تباعاً (بتأخير 0.6 ثانية لضمان السرعة ومنع التعليق)...", buttons=emergency_btns)
 
-    tasks = [
-        start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
-        for acc in accs
-    ]
-    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    # طريقة تأخير VC Player الدقيقة (0.6 ثانية بين كل حساب)
+    outcomes = []
+    for acc in accs:
+        res = await start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
+        outcomes.append((acc, res))
+        await asyncio.sleep(0.6)
 
     results = []
-    for acc, outcome in zip(accs, outcomes):
+    for acc, (success, err_msg) in outcomes:
         acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
-        if isinstance(outcome, tuple) and outcome[0]:
+        if success:
             results.append(f"حساب {acc_name}: 🟢 يعمل بنجاح (مع الصوت والفيديو)")
         else:
-            err_msg = outcome[1] if isinstance(outcome, tuple) else "خطأ غير متوقع"
             results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
 
     await edit(e, "⚡ نتائج التشغيل الجماعي:\n\n" + "\n".join(results), buttons=back_button())
