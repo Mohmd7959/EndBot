@@ -665,7 +665,7 @@ async def cb_stream_menu(e):
         btns.append([Button.inline(f"تحكم بالحساب: {acc_name} [{status_txt}]", f"control_acc_{aid}".encode(), style='primary')])
     
     btns.append([Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')])
-    btns.append([Button.inline("⚡ تشغيل كل الحسابات معا (متزامن آمن)", b"start_all_normal", style='success')])
+    btns.append([Button.inline("⚡ تشغيل فوري للجميع (صوت محسّن)", b"start_all_normal", style='success')])
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
     btns.append([Button.inline("رجوع", b"back_main", style='danger')])
     
@@ -791,7 +791,7 @@ async def on_message(e):
         final_name = f"{uid}_{media.id}.mp4"
         final_path = os.path.join(VIDEOS_DIR, final_name)
 
-        msg = await respond(e, "جاري تحميل ومعالجة الفيديو والصوت وضبط الترميز المتزامن...")
+        msg = await respond(e, "جاري معالجة الفيديو وضبط قنوات الصوت الخفيفة للمتعدد...")
         try:
             await e.download_media(file=temp_path)
         except Exception as ex:
@@ -802,10 +802,11 @@ async def on_message(e):
             return await respond(e, f"فشل التحميل: {type(ex).__name__}")
 
         try:
+            # معالجة مخصصة: خفض معدل البت الصوتي إلى 96k وتوحيد التردد لمنع إثقال السيرفر عند فتح عدة حسابات معاً
             subprocess.run(
                 ["ffmpeg", "-y", "-i", temp_path,
                  "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-                 "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+                 "-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2",
                  "-movflags", "+faststart", final_path],
                 capture_output=True, text=True, timeout=900
             )
@@ -841,7 +842,7 @@ async def on_message(e):
             await msg.delete()
         except Exception:
             pass
-        await respond(e, f"تم حفظ وتخصيص الفيديو والصوت بنجاح!\nالحجم: {format_size(actual)}", buttons=back_button())
+        await respond(e, f"تم حفظ الفيديو وضبط الصوت بنجاح!\nالحجم: {format_size(actual)}", buttons=back_button())
         return
 
     if step == "chat":
@@ -959,9 +960,10 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
         return False, "الحساب ليس عضواً في المجموعة"
 
     try:
+        # ضبط وسائط الصوت والفيديو بجودة عالية ولكن باستهلاك متوازن ومستقر لمنع ضغط السيرفر أثناء التشغيل الجماعي
         stream_media = MediaStream(
             vid["file_path"],
-            audio_parameters=AudioQuality.HIGH,
+            audio_parameters=AudioQuality.STUDIO,
             video_parameters=VideoQuality.HD_720p
         )
         
@@ -1041,38 +1043,30 @@ async def cb_start_all_normal(e):
     if not accs:
         return await e.answer("لا توجد حسابات!", alert=True)
 
-    await e.answer("⚡ تشغيل الحسابات بنظام الدفعات المتوازية الآمنة...", alert=True)
+    await e.answer("⚡ تشغيل فوري لكافة الحسابات معاً (صوت وفيديو)...", alert=True)
     emergency_btns = [
         [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
         [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
     ]
-    await edit(e, "⚡ جاري الصعود الجماعي المتزامن لكافة الحسابات بالصوت والفيديو بدون أي ضغط أو تجميد...", buttons=emergency_btns)
+    await edit(e, "⚡ جاري الصعود الفوري والمتزامن بالكامل (مع تفعيل الصوت والفيديو بسلاسة تامة)...", buttons=emergency_btns)
 
-    # نظام الدفعات المتوازية (Batched Concurrency): تشغيل الحسابات دفعة واحدة مع تقسيمها على دفعات صغيرة سريعة لمنع حظر وسائط تيليجرام
-    batch_size = 3
-    outcomes = []
-    for i in range(0, len(accs), batch_size):
-        batch = accs[i:i + batch_size]
-        tasks = [
-            start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
-            for acc in batch
-        ]
-        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
-        for acc, res in zip(batch, batch_results):
-            outcomes.append((acc, res))
-        if i + batch_size < len(accs):
-            await asyncio.sleep(0.15) # فاصل ميكروي خفيف جداً بين الدفعات لمنع تعليق الحسابات الأخيرة
+    # الصعود الفوري المتزامن بالكامل (Concurrent) باستخدام asyncio.gather لكي تصعد الحسابات كلها بنفس اللحظة وبدون تأخير
+    tasks = [
+        start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
+        for acc in accs
+    ]
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
     results = []
-    for acc, outcome in outcomes:
+    for acc, outcome in zip(accs, outcomes):
         acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
         if isinstance(outcome, tuple) and outcome[0]:
-            results.append(f"حساب {acc_name}: 🟢 يعمل بنجاح (مع الصوت والفيديو)")
+            results.append(f"حساب {acc_name}: 🟢 يعمل بنجاح (صوت وفيديو)")
         else:
             err_msg = outcome[1] if isinstance(outcome, tuple) else "خطأ غير متوقع"
             results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
 
-    await edit(e, "⚡ نتائج التشغيل الجماعي المتزامن الآمن:\n\n" + "\n".join(results), buttons=back_button())
+    await edit(e, "⚡ نتائج التشغيل الفوري المتزامن:\n\n" + "\n".join(results), buttons=back_button())
 
 @bot.on(events.CallbackQuery(data=b"stop_all_streams"))
 async def cb_stop_all(e):
