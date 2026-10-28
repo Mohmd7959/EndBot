@@ -21,6 +21,7 @@ bot = TelegramClient("bot_session", API_ID, API_HASH)
 user_state = {}
 login_pending = {}
 auto_leave_tasks = {}
+crazy_cam_tasks = {}
 
 def get_state(uid):
     if uid not in user_state:
@@ -359,6 +360,7 @@ def main_menu():
     return [
         [Button.inline("اضف حساب", b"add_account", style='success')],
         [Button.inline("فحص حساباتي", b"check_accounts", style='primary')],
+        [Button.inline("تجربة جنون الحسابات", b"crazy_loop_start", style='success')], # الزر الثالث المعدل بالوظيفة المطلوبة
         [Button.inline("حذف حساب", b"del_account", style='danger')],
         [Button.inline("📂 ملف موحد لكل الحسابات", b"add_unified_video", style='primary')],
         [Button.inline("🎥 فيديو مخصص لكل حساب", b"add_video_menu", style='primary')],
@@ -655,8 +657,7 @@ async def cb_stream_menu(e):
         btns.append([Button.inline(f"تحكم بالحساب: {acc_name} [{status_txt}]", f"control_acc_{aid}".encode(), style='primary')])
     
     btns.append([Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')])
-    btns.append([Button.inline("⚡ تشغيل كل الحسابات (كاميرا + صوت)", b"start_all_cam", style='success')])
-    btns.append([Button.inline("🎬 تشغيل اعتيادي (بدون كاميرا)", b"start_all_normal", style='primary')])
+    btns.append([Button.inline("⚡ تشغيل كل الحسابات (فيديو + صوت)", b"start_all_normal", style='success')])
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
     btns.append([Button.inline("رجوع", b"back_main", style='danger')])
     
@@ -681,8 +682,7 @@ async def cb_control_acc(e):
     acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
 
     btns = [
-        [Button.inline("▶️ بدء البث (كاميرا + صوت)", f"start_one_cam_{aid}".encode(), style='success')],
-        [Button.inline("▶️ بدء تشغيل اعتيادي (بدون كاميرا)", f"start_one_norm_{aid}".encode(), style='primary')],
+        [Button.inline("▶️ بدء البث (فيديو + صوت)", f"start_one_norm_{aid}".encode(), style='success')],
         [Button.inline("⏹️ إيقاف البث لهذا الحساب", f"stop_one_{aid}".encode(), style='danger')],
         [Button.inline("رجوع للقائمة", b"stream_menu", style='primary')]
     ]
@@ -896,7 +896,7 @@ async def finish_login_with_client(e, cli, phone, me, uid):
     login_pending.pop(uid, None)
     await respond(e, f"تم ربط الحساب بنجاح: {me.first_name} (@{me.username or '-'})", buttons=back_button())
 
-async def start_stream_for_account(uid, aid, chat_id, title, saved_link, use_cam=True):
+async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
     st = get_state(uid)
     acc = get_account(uid, aid)
     if not acc:
@@ -951,45 +951,54 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link, use_cam
         return False, "الحساب ليس عضواً في المجموعة"
 
     try:
-        # حل مشكلة TypeError نهائياً عبر تمرير MediaStream القياسي بدون تمرير معلمات إضافية تسبب التعارض
         stream_media = MediaStream(
             vid["file_path"],
             audio_parameters=AudioQuality.HIGH,
             video_parameters=VideoQuality.HD_720p
         )
         
-        # ضبط تشغيل الكاميرا الأمامية أو إغلاقها عبر GroupCallConfig بشكل متوافق تماماً
         call_config = GroupCallConfig(auto_start=False)
-        
         await call.play(chat_id, stream_media, config=call_config)
         
-        # إذا تم اختيار الكاميرا، نقوم بتفعيلها بالبث المباشر
-        if use_cam and hasattr(call, "update_video_mode"):
-            try:
-                await call.update_video_mode(chat_id, True)
-            except Exception:
-                pass
-
         set_active_stream(uid, aid, chat_id, title, vid["id"])
         return True, "تم البث بنجاح"
     except Exception as ex:
         return False, f"خطأ البث: {type(ex).__name__}"
 
-@bot.on(events.CallbackQuery(pattern=rb"^start_one_cam_(\d+)$"))
-async def cb_start_one_cam(e):
-    uid = e.sender_id
-    if not is_subscriber(uid):
-        return await e.answer("غير مصرح", alert=True)
-    aid = int(e.pattern_match.group(1))
-    ch = get_chat(uid)
-    if not ch:
-        return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
-    await e.answer("جاري تشغيل الكاميرا والصوت...", alert=True)
-    success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"), use_cam=True)
-    if success:
-        await edit(e, f"✅ تم بدء البث (مع الكاميرا والصوت) في: {ch['chat_title']}", buttons=back_button())
-    else:
-        await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
+async def start_crazy_loop_for_account(uid, aid, chat_id, title, saved_link):
+    success, msg = await start_stream_for_account(uid, aid, chat_id, title, saved_link)
+    if not success:
+        return success, msg
+
+    st = get_state(uid)
+    call = st["calls"].get(aid)
+    
+    # دالة جانبية لجنون الكاميرا (فتح وإغلاق شفاف بشكل دوري ومستمر مع بقاء الفيديو والصوت يعملان)
+    if aid in crazy_cam_tasks:
+        crazy_cam_tasks[aid].cancel()
+
+    async def crazy_cam_loop():
+        try:
+            while get_active_stream(uid, aid):
+                await asyncio.sleep(4)
+                if hasattr(call, "update_video_mode"):
+                    try:
+                        await call.update_video_mode(chat_id, True)
+                    except Exception:
+                        pass
+                await asyncio.sleep(4)
+                if hasattr(call, "update_video_mode"):
+                    try:
+                        await call.update_video_mode(chat_id, False)
+                    except Exception:
+                        pass
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    crazy_cam_tasks[aid] = asyncio.create_task(crazy_cam_loop())
+    return True, "تم البث بنجاح مع جنون الكاميرا"
 
 @bot.on(events.CallbackQuery(pattern=rb"^start_one_norm_(\d+)$"))
 async def cb_start_one_norm(e):
@@ -1000,10 +1009,10 @@ async def cb_start_one_norm(e):
     ch = get_chat(uid)
     if not ch:
         return await e.answer("يجب تعيين مجموعة البث أولاً!", alert=True)
-    await e.answer("جاري تشغيل البث الاعتيادي...", alert=True)
-    success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"), use_cam=False)
+    await e.answer("جاري تشغيل البث...", alert=True)
+    success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
     if success:
-        await edit(e, f"✅ تم بدء التشغيل الاعتيادي في: {ch['chat_title']}", buttons=back_button())
+        await edit(e, f"✅ تم بدء التشغيل في: {ch['chat_title']}", buttons=back_button())
     else:
         await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
 
@@ -1021,12 +1030,15 @@ async def cb_stop_one(e):
             await call.leave_call(active["chat_id"])
         except Exception:
             pass
+    if aid in crazy_cam_tasks:
+        crazy_cam_tasks[aid].cancel()
+        crazy_cam_tasks.pop(aid, None)
     remove_active_stream(uid, aid)
     await edit(e, "⏹️ تم إيقاف البث ونزول الحساب فوراً.", buttons=back_button())
     await e.answer("تم النزول والإيقاف")
 
-@bot.on(events.CallbackQuery(data=b"start_all_cam"))
-async def cb_start_all_cam(e):
+@bot.on(events.CallbackQuery(data=b"crazy_loop_start"))
+async def cb_crazy_loop_start(e):
     uid = e.sender_id
     if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
@@ -1037,15 +1049,15 @@ async def cb_start_all_cam(e):
     if not accs:
         return await e.answer("لا توجد حسابات!", alert=True)
 
-    await e.answer("⚡ صعود سريع جداً (مع الكاميرا والصوت)...", alert=True)
+    await e.answer("🚀 تجربة جنون الحسابات جاري العمل...", alert=True)
     emergency_btns = [
         [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
         [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
     ]
-    await edit(e, "⚡ جاري الصعود الفوري لكل الحسابات (مع الكاميرا والصوت)...", buttons=emergency_btns)
+    await edit(e, "🚀 جاري صعود الحسابات وتشغيل الفيديو والصوت مع تفعيل تأثير جنون الكاميرا الشفاف...", buttons=emergency_btns)
 
     tasks = [
-        start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"), use_cam=True)
+        start_crazy_loop_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
         for acc in accs
     ]
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1054,12 +1066,12 @@ async def cb_start_all_cam(e):
     for acc, outcome in zip(accs, outcomes):
         acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
         if isinstance(outcome, tuple) and outcome[0]:
-            results.append(f"حساب {acc_name}: 🟢 صعد بالكاميرا والصوت بنجاح")
+            results.append(f"حساب {acc_name}: 🟢 صعد ويبث مع جنون الكاميرا بنجاح")
         else:
             err_msg = outcome[1] if isinstance(outcome, tuple) else "خطأ غير متوقع"
             results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
 
-    await edit(e, "⚡ نتائج الصعود السريع:\n\n" + "\n".join(results), buttons=back_button())
+    await edit(e, "🚀 نتائج تجربة جنون الحسابات:\n\n" + "\n".join(results), buttons=back_button())
 
 @bot.on(events.CallbackQuery(data=b"start_all_normal"))
 async def cb_start_all_normal(e):
@@ -1073,15 +1085,15 @@ async def cb_start_all_normal(e):
     if not accs:
         return await e.answer("لا توجد حسابات!", alert=True)
 
-    await e.answer("⚡ تشغيل اعتيادي لكل الحسابات...", alert=True)
+    await e.answer("⚡ تشغيل كافة الحسابات...", alert=True)
     emergency_btns = [
         [Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')],
         [Button.inline("القائمة الرئيسية", b"back_main", style='primary')]
     ]
-    await edit(e, "⚡ جاري التشغيل الاعتيادي لكل الحسابات...", buttons=emergency_btns)
+    await edit(e, "⚡ جاري التشغيل الجماعي لكل الحسابات...", buttons=emergency_btns)
 
     tasks = [
-        start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"), use_cam=False)
+        start_stream_for_account(uid, acc["account_id"], ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
         for acc in accs
     ]
     outcomes = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1090,12 +1102,12 @@ async def cb_start_all_normal(e):
     for acc, outcome in zip(accs, outcomes):
         acc_name = acc['first_name'] if acc['first_name'] else mask_phone(acc['phone'])
         if isinstance(outcome, tuple) and outcome[0]:
-            results.append(f"حساب {acc_name}: 🟢 يعمل اعتيادياً بنجاح")
+            results.append(f"حساب {acc_name}: 🟢 يعمل بنجاح")
         else:
             err_msg = outcome[1] if isinstance(outcome, tuple) else "خطأ غير متوقع"
             results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
 
-    await edit(e, "⚡ نتائج التشغيل الاعتيادي:\n\n" + "\n".join(results), buttons=back_button())
+    await edit(e, "⚡ نتائج التشغيل الجماعي:\n\n" + "\n".join(results), buttons=back_button())
 
 @bot.on(events.CallbackQuery(data=b"stop_all_streams"))
 async def cb_stop_all(e):
@@ -1114,6 +1126,9 @@ async def cb_stop_all(e):
                 await call.leave_call(active["chat_id"])
             except Exception:
                 pass
+        if aid in crazy_cam_tasks:
+            crazy_cam_tasks[aid].cancel()
+            crazy_cam_tasks.pop(aid, None)
         remove_active_stream(uid, aid)
 
     if active_streams:
