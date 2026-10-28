@@ -2,7 +2,7 @@ import os
 
 API_ID = 36357841
 API_HASH = "dc3d364a47802ca079e4b3ed0fd8e62f"
-BOT_TOKEN = "8973651211:AAHsw2Dpr_T8fzYn9gH5n3o_uR0PDe5jjz4"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 DEV_ID = 8777227942
 DEV_LINK = "https://t.me/rkpkk"
