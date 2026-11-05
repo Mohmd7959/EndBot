@@ -1,3 +1,5 @@
+import static_ffmpeg
+static_ffmpeg.add_paths()
 import os, asyncio, sqlite3, subprocess, shutil, re
 from datetime import datetime, timedelta
 from telethon import TelegramClient, events
