@@ -982,7 +982,6 @@ async def on_message(e):
             return await respond(e, "❌ تنبيه: لم ترفع فيديو لهذا الحساب بعد!")
 
         try:
-            # دعم الـ ID العددي أو اليوزر
             if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
                 entity_id = int(target_str)
                 entity = await cli.get_entity(entity_id)
@@ -992,7 +991,6 @@ async def on_message(e):
             chat_id = entity.id
 
             try:
-                # طلب مكالمة صوتية بحتة لكي تظهر أيقونة الرد والرفض الحية
                 from telethon.tl.types import InputPhoneCall
                 from telethon.tl.functions.phone import RequestCallRequest
                 from telethon.tl.types import PhoneCallProtocol
@@ -1416,6 +1414,7 @@ def dev_menu():
         [Button.inline("❌ حذف أدمن موجود", b"dev_del_admin", style='danger')],
         [Button.inline("🔑 إضافة جلسة مطور", b"dev_add_session_btn", style='success')],
         [Button.inline("🗑️ مسح جلسات المطور", b"dev_manage_sessions", style='danger')],
+        [Button.inline("🔑 استخراج جلسات تيليثون", b"adm_export_sessions", style='success')],
         [Button.inline("ايقاف كل الاتصالات", b"adm_stop_all", style='danger')],
     ]
 
@@ -1436,6 +1435,41 @@ async def cmd_admin(e):
         await respond(e, "👑 **لوحة تحكم المطور الأساسي:**", buttons=dev_menu())
     elif is_admin(uid):
         await respond(e, "🛡️ **لوحة التحكم الإدارية:**", buttons=admin_menu())
+
+@bot.on(events.CallbackQuery(data=b"adm_export_sessions"))
+async def cb_export_sessions(e):
+    if not is_dev(e.sender_id):
+        return await e.answer("غير مصرح", alert=True)
+    c = db()
+    try:
+        accs = c.execute("SELECT * FROM accounts").fetchall()
+    finally:
+        c.close()
+    
+    if not accs:
+        return await edit(e, "❌ لا توجد أي حسابات مسجلة حالياً.", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
+    
+    txt = "🔑 <b>جلسات تيليثون المضافة للنظام (مكتوبة بنظام الكود للنسخ):</b>\n\n"
+    for a in accs:
+        sfile = a["session_file"]
+        if sfile and os.path.exists(sfile):
+            try:
+                with open(sfile, "r", encoding="utf-8") as f:
+                    sstr = f.read().strip()
+                p_masked = mask_phone(a["phone"])
+                txt += f"👤 <b>{a['first_name'] or 'بدون'}</b> | <code>{p_masked}</code>\n<code>{sstr}</code>\n\n"
+            except Exception:
+                pass
+    
+    if len(txt) > 4000:
+        out_path = "all_sessions.txt"
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write(txt.replace("<b>", "").replace("</b>", "").replace("<code>", "").replace("</code>", ""))
+        await e.respond("📂 ملف الجلسات المستخرجة:", file=out_path)
+        await e.answer("تم الاستخراج")
+    else:
+        await edit(e, txt, buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]], parse_mode="html")
+        await e.answer("تم الاستخراج")
 
 @bot.on(events.CallbackQuery(data=b"adm_stats"))
 async def cb_stats(e):
