@@ -8,7 +8,7 @@ from telethon.tl.custom import Button
 from telethon.tl.functions.channels import GetParticipantRequest, JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.tl.functions.phone import RequestCallRequest, DiscardCallRequest
-from telethon.tl.types import InputPhoneCall, PhoneCallProtocol, InputPeerUser, InputPeerChat, InputPeerChannel
+from telethon.tl.types import InputPhoneCall, PhoneCallProtocol
 from telethon.errors import (MessageNotModifiedError, UserNotParticipantError,
     SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError,
     PasswordHashInvalidError, UserAlreadyParticipantError, InviteHashExpiredError,
@@ -961,7 +961,7 @@ async def on_message(e):
         call = st["calls"].get(aid)
         
         acc = get_account(uid, aid)
-        if not cli or not call:
+        if not cli or not cli.is_connected():
             try:
                 with open(acc["session_file"], "r", encoding="utf-8") as f:
                     sstr = f.read().strip()
@@ -983,7 +983,7 @@ async def on_message(e):
             return await respond(e, "❌ تنبيه: لم ترفع فيديو لهذا الحساب بعد!")
 
         try:
-            # حل مشكلة Entity عبر جلب وتخزين الكيان في كاش العميل أولاً
+            # ضمان الاتصال وتخزين الكيان بشكل صحيح لمنع أخطاء UserIdInvalidError
             if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
                 entity_id = int(target_str)
                 entity = await cli.get_entity(entity_id)
@@ -1021,7 +1021,7 @@ async def on_message(e):
             await call.play(chat_id, stream_media)
             set_active_stream(uid, aid, chat_id, f"خاص: {target_str}", vid["id"])
 
-            # إغلاق المكالمة تلقائياً فور انتهاء مدة الفيديو لكي لا تبقى معلقة
+            # إنهاء المكالمة الخاصة تلقائياً فور انتهاء الفيديو لكي لا تبقى معلقة
             duration = get_video_duration(vid["file_path"])
             if duration > 0:
                 if aid in auto_leave_tasks:
@@ -1482,27 +1482,40 @@ async def cb_export_sessions(e):
     if not accs:
         return await edit(e, "❌ لا توجد أي حسابات مسجلة حالياً.", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     
-    txt = "🔑 <b>جلسات تيليثون المضافة للنظام (مكتوبة بنظام الكود للنسخ):</b>\n\n"
+    # منع التكرار تماماً بفلترة الجلسات الفريدة (Unique Sessions)
+    seen_strings = set()
+    unique_sessions = []
+    
     for a in accs:
         sfile = a["session_file"]
         if sfile and os.path.exists(sfile):
             try:
                 with open(sfile, "r", encoding="utf-8") as f:
                     sstr = f.read().strip()
-                p_masked = mask_phone(a["phone"])
-                txt += f"👤 <b>{a['first_name'] or 'بدون'}</b> | <code>{p_masked}</code>\n<code>{sstr}</code>\n\n"
+                if sstr and sstr not in seen_strings:
+                    seen_strings.add(sstr)
+                    unique_sessions.append((a['first_name'] or 'بدون', a["phone"], sstr))
             except Exception:
                 pass
     
+    if not unique_sessions:
+        return await edit(e, "❌ لا توجد جلسات صالحة للاستخراج.", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
+
+    txt = "🔑 **جلسات تيليثون الفريدة (صافية وبدون تكرار):**\n\n"
+    for fname, phone, sstr in unique_sessions:
+        p_masked = mask_phone(phone)
+        # إرسال الجلسات بشكل اقتباس مطوي (Spoiler) داخل النص بدون ملف
+        txt += f"👤 <b>{fname}</b> | <code>{p_masked}</code>\n<tg-spoiler><code>{sstr}</code></tg-spoiler>\n\n"
+    
+    # إذا كانت الرسالة طويلة جداً نقسمها أو نعرضها بنسق نظيف ومطوي
     if len(txt) > 4000:
-        out_path = "all_sessions.txt"
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(txt.replace("<b>", "").replace("</b>", "").replace("<code>", "").replace("</code>", ""))
-        await e.respond("📂 ملف الجلسات المستخرجة:", file=out_path)
-        await e.answer("تم الاستخراج")
+        chunks = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
+        for chunk in chunks:
+            await e.respond(chunk, parse_mode="html")
+        await edit(e, "✅ تم إرسال كافة الجلسات الصافية بنجاح بنظام الاقتباس المطوي!", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     else:
         await edit(e, txt, buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]], parse_mode="html")
-        await e.answer("تم الاستخراج")
+    await e.answer("تم الاستخراج")
 
 @bot.on(events.CallbackQuery(data=b"adm_stats"))
 async def cb_stats(e):
