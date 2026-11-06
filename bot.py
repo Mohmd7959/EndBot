@@ -427,7 +427,7 @@ def main_menu():
         [Button.inline("📂 ملف موحد لكل الحسابات", b"add_unified_video", style='primary')],
         [Button.inline("🎥 فيديو مخصص لكل حساب", b"add_video_menu", style='primary')],
         [Button.inline("رابط الاتصال", b"set_chat", style='primary')],
-        [Button.inline("📞 الاتصال الخاص (يوزر / ID)", b"private_call_menu", style='success')],
+        [Button.inline("📞 الاتصال الخاص (يوزر / ID / رابط Call)", b"private_call_menu", style='success')],
         [Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')],
         [Button.inline("قائمة البث والتحكم", b"stream_menu", style='success')],
     ]
@@ -740,7 +740,7 @@ async def cb_priv_call_acc(e):
         return await e.answer("غير مصرح", alert=True)
     aid = int(e.pattern_match.group(1))
     login_pending[e.sender_id] = {"step": "private_call_target", "target_aid": aid}
-    await edit(e, "👤 أرسل الآن **يوزر المستخدم** أو **الـ ID العددي** لبدء المكالمة الصوتية وبث الفيديو فوراً:", buttons=back_button())
+    await edit(e, "👤 أرسل الآن **يوزر المستخدم** أو **الـ ID** أو **رابط الاتصال (t.me/call/...)** لبدء المكالمة وبث الفيديو فوراً:", buttons=back_button())
     await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"stream_menu"))
@@ -900,7 +900,16 @@ async def on_message(e):
             lp["client"] = cli
             lp["phone_code_hash"] = res.phone_code_hash
             lp["step"] = "code"
-            await respond(e, "ارسل الكود المرسل اليك من تيليجرام:")
+            
+            # رسالة الكود مع الزر المحدث بالرابط الجديد
+            code_tip = (
+                "<b>أرسل الكود المرسل إليك من \"تيليجرام\"</b>\n"
+                "اكتبه بالشكل المطلوب (مثال): <code>5 3 7 9 5</code>"
+            )
+            code_buttons = [
+                [Button.url("اضغط هنا تجد الكود", "https://t.me/+42777")]
+            ]
+            await respond(e, code_tip, buttons=code_buttons, parse_mode="html")
         except Exception as ex:
             await respond(e, f"خطأ: {type(ex).__name__}")
         return
@@ -955,7 +964,7 @@ async def on_message(e):
         aid = lp.get("target_aid")
         login_pending.pop(uid, None)
 
-        msg = await respond(e, f"📞 جاري الاتصال الصوتي بـ ( {target_str} ) وبدء البث...")
+        msg = await respond(e, f"📞 جاري معالجة الاتصال بـ ( {target_str} ) وبدء البث...")
         st = get_state(uid)
         cli = st["clients"].get(aid)
         call = st["calls"].get(aid)
@@ -983,33 +992,44 @@ async def on_message(e):
             return await respond(e, "❌ تنبيه: لم ترفع فيديو لهذا الحساب بعد!")
 
         try:
-            # ضمان الاتصال وتخزين الكيان بشكل صحيح لمنع أخطاء UserIdInvalidError
-            if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
-                entity_id = int(target_str)
-                entity = await cli.get_entity(entity_id)
-            else:
-                entity = await cli.get_entity(target_str)
-            
-            chat_id = entity.id
-            input_peer = await cli.get_input_entity(entity)
-
+            chat_id = None
+            input_peer = None
             call_res = None
-            try:
-                call_res = await cli(RequestCallRequest(
-                    user_id=input_peer,
-                    g_a_hash=b'\x00' * 256,
-                    protocol=PhoneCallProtocol(
-                        min_layer=65,
-                        max_layer=92,
-                        library_versions=["4.0.0"],
-                        udp_p2p=True,
-                        udp_reflector=True
-                    )
-                ))
-            except Exception:
-                pass
+            is_invite_call = False
 
-            await msg.edit("⏳ جاري انتظار قبول المكالمة الصوتية وبث الفيديو عبر PyTgCalls...")
+            if "t.me/call/" in target_str or "telegram.me/call/" in target_str:
+                is_invite_call = True
+                m = re.search(r't\.me/call/([A-Za-z0-9_\-]+)', target_str)
+                if not m:
+                    return await respond(e, "❌ رابط مكالمة غير صالح.")
+                call_hash = m.group(1)
+                chat_id = target_str
+            else:
+                if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
+                    entity_id = int(target_str)
+                    entity = await cli.get_entity(entity_id)
+                else:
+                    entity = await cli.get_entity(target_str)
+                
+                chat_id = entity.id
+                input_peer = await cli.get_input_entity(entity)
+
+                try:
+                    call_res = await cli(RequestCallRequest(
+                        user_id=input_peer,
+                        g_a_hash=b'\x00' * 256,
+                        protocol=PhoneCallProtocol(
+                            min_layer=65,
+                            max_layer=92,
+                            library_versions=["4.0.0"],
+                            udp_p2p=True,
+                            udp_reflector=True
+                        )
+                    ))
+                except Exception:
+                    pass
+
+            await msg.edit("⏳ جاري تشغيل البث عبر PyTgCalls...")
             await asyncio.sleep(2)
 
             stream_media = MediaStream(
@@ -1019,9 +1039,8 @@ async def on_message(e):
             )
             
             await call.play(chat_id, stream_media)
-            set_active_stream(uid, aid, chat_id, f"خاص: {target_str}", vid["id"])
+            set_active_stream(uid, aid, chat_id if not is_invite_call else 0, f"خاص: {target_str}", vid["id"])
 
-            # إنهاء المكالمة الخاصة تلقائياً فور انتهاء الفيديو لكي لا تبقى معلقة
             duration = get_video_duration(vid["file_path"])
             if duration > 0:
                 if aid in auto_leave_tasks:
@@ -1035,7 +1054,7 @@ async def on_message(e):
                             await call.leave_call(chat_id)
                         except Exception:
                             pass
-                        if call_res and hasattr(call_res, 'phone_call'):
+                        if not is_invite_call and call_res and hasattr(call_res, 'phone_call'):
                             try:
                                 await cli(DiscardCallRequest(
                                     peer=input_peer,
@@ -1058,14 +1077,14 @@ async def on_message(e):
                 await msg.delete()
             except Exception:
                 pass
-            await respond(e, f"✅ تم تشغيل البث الصوتي والمرئي بنجاح مع ({target_str}) في المكالمة الخاصة وسيتم إنهاؤها تلقائياً بعد انتهاء الفيديو!", buttons=back_button())
+            await respond(e, f"✅ تم تشغيل البث بنجاح مع ({target_str}) وسيتم إنهاؤه تلقائياً فور انتهاء الفيديو!", buttons=back_button())
             
         except Exception as ex:
             try:
                 await msg.delete()
             except Exception:
                 pass
-            await respond(e, f"❌ فشل الاتصال الصوتي بالخاص: {type(ex).__name__} - {str(ex)}")
+            await respond(e, f"❌ فشل الاتصال بالخاص: {type(ex).__name__} - {str(ex)}")
         return
 
     if step in ("video", "unified_video"):
@@ -1482,7 +1501,6 @@ async def cb_export_sessions(e):
     if not accs:
         return await edit(e, "❌ لا توجد أي حسابات مسجلة حالياً.", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     
-    # منع التكرار تماماً بفلترة الجلسات الفريدة (Unique Sessions)
     seen_strings = set()
     unique_sessions = []
     
@@ -1504,10 +1522,8 @@ async def cb_export_sessions(e):
     txt = "🔑 **جلسات تيليثون الفريدة (صافية وبدون تكرار):**\n\n"
     for fname, phone, sstr in unique_sessions:
         p_masked = mask_phone(phone)
-        # إرسال الجلسات بشكل اقتباس مطوي (Spoiler) داخل النص بدون ملف
         txt += f"👤 <b>{fname}</b> | <code>{p_masked}</code>\n<tg-spoiler><code>{sstr}</code></tg-spoiler>\n\n"
     
-    # إذا كانت الرسالة طويلة جداً نقسمها أو نعرضها بنسق نظيف ومطوي
     if len(txt) > 4000:
         chunks = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
         for chunk in chunks:
