@@ -9,11 +9,6 @@ from telethon.tl.functions.channels import GetParticipantRequest, JoinChannelReq
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.tl.functions.phone import RequestCallRequest, DiscardCallRequest
 from telethon.tl.types import InputPhoneCall, PhoneCallProtocol
-from telethon.errors import (MessageNotModifiedError, UserNotParticipantError,
-    SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError,
-    PasswordHashInvalidError, UserAlreadyParticipantError, InviteHashExpiredError,
-    InviteHashInvalidError, ChatAdminRequiredError, ChannelPrivateError,
-    FloodWaitError, ChannelsTooMuchError, PhoneNumberInvalidError)
 from telethon.utils import get_peer_id
 from pytgcalls import PyTgCalls, idle
 from pytgcalls.types import MediaStream, GroupCallConfig, AudioQuality, VideoQuality
@@ -901,7 +896,6 @@ async def on_message(e):
             lp["phone_code_hash"] = res.phone_code_hash
             lp["step"] = "code"
             
-            # رسالة الكود مع الزر المحدث بالرابط الجديد
             code_tip = (
                 "<b>أرسل الكود المرسل إليك من \"تيليجرام\"</b>\n"
                 "اكتبه بالشكل المطلوب (مثال): <code>5 3 7 9 5</code>"
@@ -999,10 +993,6 @@ async def on_message(e):
 
             if "t.me/call/" in target_str or "telegram.me/call/" in target_str:
                 is_invite_call = True
-                m = re.search(r't\.me/call/([A-Za-z0-9_\-]+)', target_str)
-                if not m:
-                    return await respond(e, "❌ رابط مكالمة غير صالح.")
-                call_hash = m.group(1)
                 chat_id = target_str
             else:
                 if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
@@ -1190,6 +1180,95 @@ async def on_message(e):
             await respond(e, f"تمت إضافة المشترك بنجاح!\nينتهي في: {exp.strftime('%Y-%m-%d')}")
         except ValueError:
             await respond(e, "أدخل عدد أيام صالح:")
+        return
+
+    if step == "dev_add_sub_all_input":
+        login_pending.pop(e.sender_id, None)
+        if not is_dev(e.sender_id):
+            return
+        
+        text = e.text.strip()
+        # تحليل المدخلات (مثال: 2 hours أو 3 days أو 5 minutes أو عدد أرقام صافي يعتبر أيام)
+        try:
+            if "hour" in text.lower() or "ساع" in text:
+                num = int(re.search(r'\d+', text).group())
+                delta = timedelta(hours=num)
+                duration_label = f"{num} ساعة ⏱️"
+            elif "min" in text.lower() or "دقيق" in text:
+                num = int(re.search(r'\d+', text).group())
+                delta = timedelta(minutes=num)
+                duration_label = f"{num} دقيقة ⏱️"
+            elif "week" in text.lower() or "اسبوع" in text or "أسبوع" in text:
+                num = int(re.search(r'\d+', text).group())
+                delta = timedelta(weeks=num)
+                duration_label = f"{num} أسبوع 📅"
+            else:
+                num = int(re.search(r'\d+', text).group())
+                delta = timedelta(days=num)
+                duration_label = f"{num} يوم 📅"
+        except Exception:
+            return await respond(e, "❌ صيغة غير صالحة. أرسل الرقم والوحدة بشكل صحيح (مثال: `2 hours` أو `1 day`).")
+
+        c = db()
+        try:
+            users = c.execute("SELECT user_id FROM users").fetchall()
+        finally:
+            c.close()
+
+        if not users:
+            return await respond(e, "⚠️ لا توجد أي مستخدمين مسجلين في قاعدة البيانات حتى الآن!")
+
+        msg_wait = await respond(e, "⏳ جاري تفعيل الاشتراك الجماعي وإرسال الإشعارات للمستخدمين...")
+        
+        now = datetime.now()
+        new_exp = now + delta
+        success_count = 0
+
+        for u in users:
+            uid_target = u["user_id"]
+            # إضافة الاشتراك في قاعدة البيانات
+            c = db()
+            try:
+                existing = c.execute("SELECT expires_at FROM subscribers WHERE user_id=?", (uid_target,)).fetchone()
+                current_exp = now
+                if existing and existing["expires_at"]:
+                    try:
+                        parsed_exp = datetime.fromisoformat(existing["expires_at"])
+                        if parsed_exp > now:
+                            current_exp = parsed_exp
+                    except Exception:
+                        pass
+                
+                final_exp = current_exp + delta
+                c.execute("INSERT OR REPLACE INTO subscribers(user_id, added_at, expires_at) VALUES(?,?,?)", 
+                          (uid_target, now.isoformat(), final_exp.isoformat()))
+                c.commit()
+            except Exception:
+                pass
+            finally:
+                c.close()
+
+            # إرسال إشعار للمستخدم
+            try:
+                notif_text = (
+                    f"🎉 **مبروك يا غالي!**\n"
+                    f"✨ **تم إضافة اشتراك جماعي لك من قبل الإدارة!**\n"
+                    f"⏳ **المدة المضافة:** `{duration_label}`\n"
+                    f"📅 **ينتهي الاشتراك في:** `{final_exp.strftime('%Y-%m-%d %H:%M')}`\n"
+                    f"🚀 استمتع بكافة مميزات البوت الآن!"
+                )
+                await bot.send_message(uid_target, notif_text, parse_mode="markdown")
+                success_count += 1
+                await asyncio.sleep(0.05) # لتجنب ضغط FloodWait
+            except Exception:
+                pass
+
+        try:
+            await msg_wait.delete()
+        except Exception:
+            pass
+
+        await respond(e, f"✅ **تمت عملية الاشتراك الجماعي بنجاح تام!**\n\n👥 إجمالي المستفيدين: `{success_count}` مستخدم\n⏱️ المدة المضافة: `{duration_label}`\n🎉 وتم إرسال الإشعارات للجميع بنجاح!")
         return
 
     if step == "adm_add_admin_id":
@@ -1461,6 +1540,7 @@ def dev_menu():
         [Button.inline("عرض المشتركين", b"adm_list_subs", style='primary')],
         [Button.inline("الاتصالات الجارية", b"adm_active", style='primary')],
         [Button.inline("اضف مشترك", b"adm_add_sub", style='success')],
+        [Button.inline("🎁 إضافة اشتراك للجميع", b"dev_add_sub_all", style='success')],
         [Button.inline("حذف مشترك", b"adm_del_sub", style='danger')],
         [Button.inline("➕ إضافة أدمن جديد", b"dev_add_admin", style='success')],
         [Button.inline("❌ حذف أدمن موجود", b"dev_del_admin", style='danger')],
@@ -1528,7 +1608,7 @@ async def cb_export_sessions(e):
         chunks = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
         for chunk in chunks:
             await e.respond(chunk, parse_mode="html")
-        await edit(e, "✅ تم إرسال كافة الجلسات الصافية بنجاح بنظام الاقتباس المطوي!", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
+        await edit(e, "✅ تم إرسال كافة الجلسات الصافية بنجاح بنظام الاقتباس المطوي والنصي!", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     else:
         await edit(e, txt, buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]], parse_mode="html")
     await e.answer("تم الاستخراج")
@@ -1576,6 +1656,14 @@ async def cb_addsub(e):
     login_pending[e.sender_id] = {"step": "adm_add_sub_id"}
     b_target = b"dev_back" if is_dev(e.sender_id) else b"adm_back"
     await edit(e, "ارسل ID المستخدم:", buttons=[[Button.inline("رجوع", b_target, style='danger')]])
+    await e.answer()
+
+@bot.on(events.CallbackQuery(data=b"dev_add_sub_all"))
+async def cb_dev_add_sub_all(e):
+    if not is_dev(e.sender_id):
+        return await e.answer("غير مصرح", alert=True)
+    login_pending[e.sender_id] = {"step": "dev_add_sub_all_input"}
+    await edit(e, "🎁 **أرسل المدة المراد إضافتها للجميع**\n(مثال: `1 day` أو `2 hours` أو `30 minutes` أو `3` لأجل 3 أيام):", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"adm_del_sub"))
