@@ -7,7 +7,8 @@ from telethon.sessions import StringSession
 from telethon.tl.custom import Button
 from telethon.tl.functions.channels import GetParticipantRequest, JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest
-from telethon.tl.functions.phone import RequestCallRequest
+from telethon.tl.functions.phone import RequestCallRequest, DiscardCallRequest
+from telethon.tl.types import InputPhoneCall, PhoneCallProtocol, InputPeerUser, InputPeerChat, InputPeerChannel
 from telethon.errors import (MessageNotModifiedError, UserNotParticipantError,
     SessionPasswordNeededError, PhoneCodeInvalidError, PhoneCodeExpiredError,
     PasswordHashInvalidError, UserAlreadyParticipantError, InviteHashExpiredError,
@@ -982,6 +983,7 @@ async def on_message(e):
             return await respond(e, "❌ تنبيه: لم ترفع فيديو لهذا الحساب بعد!")
 
         try:
+            # حل مشكلة Entity عبر جلب وتخزين الكيان في كاش العميل أولاً
             if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
                 entity_id = int(target_str)
                 entity = await cli.get_entity(entity_id)
@@ -989,14 +991,12 @@ async def on_message(e):
                 entity = await cli.get_entity(target_str)
             
             chat_id = entity.id
+            input_peer = await cli.get_input_entity(entity)
 
+            call_res = None
             try:
-                from telethon.tl.types import InputPhoneCall
-                from telethon.tl.functions.phone import RequestCallRequest
-                from telethon.tl.types import PhoneCallProtocol
-                
-                await cli(RequestCallRequest(
-                    user_id=entity,
+                call_res = await cli(RequestCallRequest(
+                    user_id=input_peer,
                     g_a_hash=b'\x00' * 256,
                     protocol=PhoneCallProtocol(
                         min_layer=65,
@@ -1020,12 +1020,45 @@ async def on_message(e):
             
             await call.play(chat_id, stream_media)
             set_active_stream(uid, aid, chat_id, f"خاص: {target_str}", vid["id"])
+
+            # إغلاق المكالمة تلقائياً فور انتهاء مدة الفيديو لكي لا تبقى معلقة
+            duration = get_video_duration(vid["file_path"])
+            if duration > 0:
+                if aid in auto_leave_tasks:
+                    auto_leave_tasks[aid].cancel()
+                
+                async def auto_end_private_call():
+                    await asyncio.sleep(duration + 1.5)
+                    active = get_active_stream(uid, aid)
+                    if active:
+                        try:
+                            await call.leave_call(chat_id)
+                        except Exception:
+                            pass
+                        if call_res and hasattr(call_res, 'phone_call'):
+                            try:
+                                await cli(DiscardCallRequest(
+                                    peer=input_peer,
+                                    duration=int(duration),
+                                    reason=InputPhoneCall(
+                                        id=call_res.phone_call.id,
+                                        access_hash=call_res.phone_call.access_hash
+                                    ),
+                                    rating=1,
+                                    video=True
+                                ))
+                            except Exception:
+                                pass
+                        remove_active_stream(uid, aid)
+                    auto_leave_tasks.pop(aid, None)
+                
+                auto_leave_tasks[aid] = asyncio.create_task(auto_end_private_call())
             
             try:
                 await msg.delete()
             except Exception:
                 pass
-            await respond(e, f"✅ تم تشغيل البث الصوتي والمرئي بنجاح مع ({target_str}) في المكالمة الخاصة!", buttons=back_button())
+            await respond(e, f"✅ تم تشغيل البث الصوتي والمرئي بنجاح مع ({target_str}) في المكالمة الخاصة وسيتم إنهاؤها تلقائياً بعد انتهاء الفيديو!", buttons=back_button())
             
         except Exception as ex:
             try:
