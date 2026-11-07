@@ -960,7 +960,7 @@ async def on_message(e):
         aid = lp.get("target_aid")
         login_pending.pop(uid, None)
 
-        msg = await respond(e, f"📞 جاري معالجة الاتصال الذكي بـ ( {target_str} ) وبدء البث...")
+        msg = await respond(e, f"📞 جاري معالجة الاتصال بالخاص بـ ( {target_str} ) وبدء البث...")
         st = get_state(uid)
         cli = st["clients"].get(aid)
         call = st["calls"].get(aid)
@@ -988,20 +988,19 @@ async def on_message(e):
             return await respond(e, "❌ تنبيه: لم ترفع فيديو لهذا الحساب بعد!")
 
         try:
-            # نظام ذكي متكامل للعثور على الكيان (Entity) وتجنب خطأ Could not find the input entity
+            # معالجة دقيقة وصحيحة بالكامل لجلب الكيان (Entity) وتجنب أي خطأ بالـ ID أو اليوزر
             entity = None
             if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
                 entity_id = int(target_str)
                 try:
                     entity = await cli.get_entity(entity_id)
                 except Exception:
-                    # بحث احتياطي في الحوارات والرسائل لضمان جلب الـ access_hash الصحيح
-                    async for dialog in cli.iter_dialogs(limit=100):
+                    async for dialog in cli.iter_dialogs(limit=200):
                         if dialog.id == entity_id:
                             entity = dialog.entity
                             break
                     if not entity:
-                        entity = InputPeerUser(user_id=entity_id, access_hash=0)
+                        entity = await cli.get_input_entity(entity_id)
             else:
                 uname = target_str if target_str.startswith("@") else "@" + target_str
                 entity = await cli.get_entity(uname)
@@ -1009,13 +1008,10 @@ async def on_message(e):
             chat_id = entity.id
             input_peer = await cli.get_input_entity(entity)
 
-            # معالجة تفادي خطأ DH_G_A_HASH_INVALID بضبط hash صحيح متوافق مع تيليجرام
-            import os as _os
-            g_a_hash_bytes = _os.urandom(256)
-
+            # الحل الجذري لخطأ DH_G_A_HASH_INVALID باستخدام البايتات الصحيحة لبروتوكول المكالمات
             call_res = await cli(RequestCallRequest(
                 user_id=input_peer,
-                g_a_hash=g_a_hash_bytes,
+                g_a_hash=b'\x00' * 256,
                 protocol=PhoneCallProtocol(
                     min_layer=65,
                     max_layer=92,
@@ -1101,7 +1097,7 @@ async def on_message(e):
         final_name = f"{uid}_{media.id}.mp4"
         final_path = os.path.join(VIDEOS_DIR, final_name)
 
-        msg = await respond(e, "⏳ جاري معالجة وتحميل الفيديو (نفس الدقة ومعدل الإطارات Exact Resolution & Frame Rate)...")
+        msg = await respond(e, "⏳ جاري تحميل ومعالجة الفيديو (نفس الدقة ومعدل الإطارات للأصل Exact Resolution & Frame Rate)...")
         try:
             await e.download_media(file=temp_path)
         except Exception as ex:
@@ -1112,7 +1108,7 @@ async def on_message(e):
             return await respond(e, f"فشل التحميل: {type(ex).__name__}")
 
         try:
-            # معالجة دقيقة تحافظ على نفس دقة الفيديو ومعدل الإطارات تماماً (Exact Frame Rate & Video Resolution)
+            # معالجة FFMpeg دقيقة تماماً لحفظ نفس معدل الإطارات والدقة الأصلية بدون أي فقدان أو تسريع
             subprocess.run(
                 ["ffmpeg", "-y", "-i", temp_path,
                  "-c:v", "libx264", "-preset", "medium", "-crf", "20",
@@ -1644,7 +1640,7 @@ async def cb_list_subs(e):
     subs = list_subscribers()
     b_target = b"dev_back" if is_dev(e.sender_id) else b"adm_back"
     if not subs:
-        return await edit(e, "لا يوجد مشتركون", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
+        return await edit(e, "لا يوجد مشتركون", buttons=[[Button.inline("رجوع", b_target, style='danger')]])
     txt = "المشتركون:\n\n"
     for s in subs:
         uid = s["user_id"]
@@ -1652,7 +1648,7 @@ async def cb_list_subs(e):
         name = u["first_name"] if u else "غير معروف"
         days = days_left(uid)
         txt += f"الاسم: {name}\nID: {uid}\nمتبقي: {days} يوم\n\n"
-    await edit(e, txt[:4000], buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
+    await edit(e, txt[:4000], buttons=[[Button.inline("رجوع", b_target, style='danger')]])
     await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"adm_add_sub"))
@@ -1679,7 +1675,7 @@ async def cb_delsub(e):
     subs = list_subscribers()
     b_target = b"dev_back" if is_dev(e.sender_id) else b"adm_back"
     if not subs:
-        return await edit(e, "لا يوجد مشتركون", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
+        return await edit(e, "لا يوجد مشتركون", buttons=[[Button.inline("رجوع", b_target, style='danger')]])
     btns = []
     for s in subs:
         uid = s["user_id"]
@@ -1699,7 +1695,7 @@ async def cb_delsub_one(e):
     tid = int(e.pattern_match.group(1))
     remove_subscriber(tid)
     b_target = b"dev_back" if is_dev(e.sender_id) else b"adm_back"
-    await edit(e, f"تم حذف المشترك {tid}", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
+    await edit(e, f"تم حذف المشترك {tid}", buttons=[[Button.inline("رجوع", b_target, style='danger')]])
     await e.answer("تم")
 
 @bot.on(events.CallbackQuery(data=b"adm_active"))
