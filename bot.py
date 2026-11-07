@@ -8,11 +8,11 @@ from telethon.tl.custom import Button
 from telethon.tl.functions.channels import GetParticipantRequest, JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from telethon.tl.functions.phone import RequestCallRequest, DiscardCallRequest
-from telethon.tl.types import InputPhoneCall, PhoneCallProtocol, InputPeerUser
+from telethon.tl.types import InputPhoneCall, PhoneCallProtocol
 from telethon.utils import get_peer_id
-from telethon.errors import UserAlreadyParticipantError, SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
+from telethon.errors import MessageNotModifiedError, UserAlreadyParticipantError, SessionPasswordNeededError, PhoneCodeInvalidError
 from pytgcalls import PyTgCalls, idle
-from pytgcalls.types import MediaStream, GroupCallConfig, AudioQuality, VideoQuality
+from pytgcalls.types import MediaStream, AudioQuality, VideoQuality
 from config import *
 
 bot = TelegramClient("bot_session", API_ID, API_HASH)
@@ -44,7 +44,6 @@ def init_db():
     )""")
     c.execute("CREATE TABLE IF NOT EXISTS admins(user_id INTEGER PRIMARY KEY, added_at TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS accounts(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, account_id INTEGER, phone TEXT, first_name TEXT, username TEXT, session_file TEXT, added_at TEXT, UNIQUE(user_id, account_id))")
-    
     c.execute("""CREATE TABLE IF NOT EXISTS dev_sessions(
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         account_id INTEGER UNIQUE,
@@ -52,7 +51,6 @@ def init_db():
         session_string TEXT,
         added_at TEXT
     )""")
-    
     c.execute("""CREATE TABLE IF NOT EXISTS videos(
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
         user_id INTEGER, 
@@ -63,7 +61,6 @@ def init_db():
         added_at TEXT,
         UNIQUE(user_id, account_id)
     )""")
-    
     c.execute("CREATE TABLE IF NOT EXISTS chats(user_id INTEGER PRIMARY KEY, chat_id INTEGER, chat_title TEXT, invite_link TEXT, set_at TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS active_streams(user_id INTEGER, account_id INTEGER, chat_id INTEGER, chat_title TEXT, video_id INTEGER, started_at TEXT, PRIMARY KEY(user_id, account_id))")
     
@@ -386,7 +383,7 @@ async def respond(event, text, buttons=None, **kw):
 async def edit(event, text, buttons=None, **kw):
     try:
         await event.edit(text, buttons=buttons, **kw)
-    except Exception:
+    except MessageNotModifiedError:
         pass
 
 async def reject_if_not_subscribed(event):
@@ -538,7 +535,7 @@ async def cb_back(e):
         return await e.answer("غير مصرح", alert=True)
     try:
         await e.edit(MAIN_TEXT, buttons=main_menu())
-    except Exception:
+    except MessageNotModifiedError:
         pass
     await e.answer()
 
@@ -738,7 +735,7 @@ async def cb_priv_call_acc(e):
         return await e.answer("غير مصرح", alert=True)
     aid = int(e.pattern_match.group(1))
     login_pending[e.sender_id] = {"step": "private_call_target", "target_aid": aid}
-    await edit(e, "👤 أرسل الآن **يوزر المستخدم** أو **الـ ID** فقط لبدء المكالمة وبث الفيديو فوراً:", buttons=back_button())
+    await edit(e, "👤 أرسل الآن **يوزر المستخدم** أو **الـ ID العددي** لبدء المكالمة الصوتية وبث الفيديو فوراً في الاتصال الخاص:", buttons=back_button())
     await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"stream_menu"))
@@ -897,15 +894,7 @@ async def on_message(e):
             lp["client"] = cli
             lp["phone_code_hash"] = res.phone_code_hash
             lp["step"] = "code"
-            
-            code_tip = (
-                "<b>أرسل الكود المرسل إليك من \"تيليجرام\"</b>\n"
-                "اكتبه بالشكل المطلوب (مثال): <code>5 3 7 9 5</code>"
-            )
-            code_buttons = [
-                [Button.url("اضغط هنا تجد الكود", "https://t.me/+42777")]
-            ]
-            await respond(e, code_tip, buttons=code_buttons, parse_mode="html")
+            await respond(e, "ارسل الكود المرسل اليك من تيليجرام:")
         except Exception as ex:
             await respond(e, f"خطأ: {type(ex).__name__}")
         return
@@ -960,13 +949,13 @@ async def on_message(e):
         aid = lp.get("target_aid")
         login_pending.pop(uid, None)
 
-        msg = await respond(e, f"📞 جاري معالجة الاتصال بالخاص بـ ( {target_str} ) وبدء البث...")
+        msg = await respond(e, f"📞 جاري الاتصال الصوتي بالخاص بـ ( {target_str} ) وبدء البث...")
         st = get_state(uid)
         cli = st["clients"].get(aid)
         call = st["calls"].get(aid)
         
         acc = get_account(uid, aid)
-        if not cli or not cli.is_connected():
+        if not cli or not call:
             try:
                 with open(acc["session_file"], "r", encoding="utf-8") as f:
                     sstr = f.read().strip()
@@ -988,7 +977,6 @@ async def on_message(e):
             return await respond(e, "❌ تنبيه: لم ترفع فيديو لهذا الحساب بعد!")
 
         try:
-            # معالجة دقيقة وصحيحة بالكامل لجلب الكيان (Entity) وتجنب أي خطأ بالـ ID أو اليوزر
             entity = None
             if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
                 entity_id = int(target_str)
@@ -1008,7 +996,6 @@ async def on_message(e):
             chat_id = entity.id
             input_peer = await cli.get_input_entity(entity)
 
-            # الحل الجذري لخطأ DH_G_A_HASH_INVALID باستخدام البايتات الصحيحة لبروتوكول المكالمات
             call_res = await cli(RequestCallRequest(
                 user_id=input_peer,
                 g_a_hash=b'\x00' * 256,
@@ -1021,7 +1008,7 @@ async def on_message(e):
                 )
             ))
 
-            await msg.edit("⏳ جاري تشغيل البث عبر PyTgCalls...")
+            await msg.edit("⏳ جاري تشغيل البث المرئي والصوتي بالاتصال الخاص...")
             await asyncio.sleep(2)
 
             stream_media = MediaStream(
@@ -1069,7 +1056,7 @@ async def on_message(e):
                 await msg.delete()
             except Exception:
                 pass
-            await respond(e, f"✅ تم تشغيل البث بنجاح مع ({target_str}) وسيتم إنهاء المكالمة تلقائياً فور انتهاء الفيديو!", buttons=back_button())
+            await respond(e, f"✅ تم تشغيل البث الخاص بنجاح مع ({target_str}) وسيتم إغلاق المكالمة تلقائياً فور انتهاء الفيديو!", buttons=back_button())
             
         except Exception as ex:
             try:
@@ -1097,7 +1084,7 @@ async def on_message(e):
         final_name = f"{uid}_{media.id}.mp4"
         final_path = os.path.join(VIDEOS_DIR, final_name)
 
-        msg = await respond(e, "⏳ جاري تحميل ومعالجة الفيديو (نفس الدقة ومعدل الإطارات للأصل Exact Resolution & Frame Rate)...")
+        msg = await respond(e, "⏳ جاري معالجة الفيديو بالترميز والجودة الأصلية...")
         try:
             await e.download_media(file=temp_path)
         except Exception as ex:
@@ -1108,13 +1095,12 @@ async def on_message(e):
             return await respond(e, f"فشل التحميل: {type(ex).__name__}")
 
         try:
-            # معالجة FFMpeg دقيقة تماماً لحفظ نفس معدل الإطارات والدقة الأصلية بدون أي فقدان أو تسريع
             subprocess.run(
                 ["ffmpeg", "-y", "-i", temp_path,
                  "-c:v", "libx264", "-preset", "medium", "-crf", "20",
                  "-fps_mode", "cfr", "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
                  "-movflags", "+faststart", final_path],
-                capture_output=True, text=True, timeout=1200
+                capture_output=True, text=True, timeout=900
             )
         except Exception:
             shutil.copy2(temp_path, final_path)
@@ -1147,7 +1133,7 @@ async def on_message(e):
             await msg.delete()
         except Exception:
             pass
-        await respond(e, f"✅ تم حفظ الفيديو بدقة مطابقة تماماً للأصل (Exact Frame Rate & Resolution)!\nالحجم: {format_size(actual)}", buttons=back_button())
+        await respond(e, f"✅ تم حفظ الفيديو والجودة الأصلية بنجاح!\nالحجم: {format_size(actual)}", buttons=back_button())
         return
 
     if step == "chat":
@@ -1284,35 +1270,6 @@ async def on_message(e):
             await respond(e, f"✅ تمت إضافة المستخدم `{tid}` كمساعد أدمن بنجاح وإشعاره!", parse_mode="markdown")
         except ValueError:
             await respond(e, "❌ ID غير صالح، أرسل أرقاماً فقط.")
-        return
-
-    if step == "dev_add_session":
-        login_pending.pop(e.sender_id, None)
-        if not is_dev(e.sender_id):
-            return
-        sstr = e.text.strip()
-        try:
-            cli = TelegramClient(StringSession(sstr), API_ID, API_HASH)
-            await cli.connect()
-            if not await cli.is_user_authorized():
-                await cli.disconnect()
-                return await respond(e, "❌ الجلسة غير صالحة أو منتهية!")
-            me = await cli.get_me()
-            aid = me.id
-            fname = me.first_name or "حساب مطور"
-            await cli.disconnect()
-
-            c = db()
-            try:
-                c.execute("INSERT OR REPLACE INTO dev_sessions(account_id, first_name, session_string, added_at) VALUES(?,?,?,?)", 
-                          (aid, fname, sstr, datetime.now().isoformat()))
-                c.commit()
-            finally:
-                c.close()
-
-            await respond(e, f"✅ تم إضافة جلسة المطور بنجاح!\n👤 الاسم: {fname}\n📱 ID: `{aid}`", parse_mode="markdown")
-        except Exception as ex:
-            await respond(e, f"❌ حدث خطأ أثناء إضافة جلسة المطور: {type(ex).__name__}")
         return
 
 async def finish_login(e, cli, phone, uid):
@@ -1545,10 +1502,6 @@ def dev_menu():
         [Button.inline("🎁 إضافة اشتراك للجميع", b"dev_add_sub_all", style='success')],
         [Button.inline("حذف مشترك", b"adm_del_sub", style='danger')],
         [Button.inline("➕ إضافة أدمن جديد", b"dev_add_admin", style='success')],
-        [Button.inline("❌ حذف أدمن موجود", b"dev_del_admin", style='danger')],
-        [Button.inline("🔑 إضافة جلسة مطور", b"dev_add_session_btn", style='success')],
-        [Button.inline("🗑️ مسح جلسات المطور", b"dev_manage_sessions", style='danger')],
-        [Button.inline("🔑 استخراج جلسات تيليثون", b"adm_export_sessions", style='success')],
         [Button.inline("ايقاف كل الاتصالات", b"adm_stop_all", style='danger')],
     ]
 
@@ -1569,51 +1522,6 @@ async def cmd_admin(e):
         await respond(e, "👑 **لوحة تحكم المطور الأساسي:**", buttons=dev_menu())
     elif is_admin(uid):
         await respond(e, "🛡️ **لوحة التحكم الإدارية:**", buttons=admin_menu())
-
-@bot.on(events.CallbackQuery(data=b"adm_export_sessions"))
-async def cb_export_sessions(e):
-    if not is_dev(e.sender_id):
-        return await e.answer("غير مصرح", alert=True)
-    c = db()
-    try:
-        accs = c.execute("SELECT * FROM accounts").fetchall()
-    finally:
-        c.close()
-    
-    if not accs:
-        return await edit(e, "❌ لا توجد أي حسابات مسجلة حالياً.", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
-    
-    seen_strings = set()
-    unique_sessions = []
-    
-    for a in accs:
-        sfile = a["session_file"]
-        if sfile and os.path.exists(sfile):
-            try:
-                with open(sfile, "r", encoding="utf-8") as f:
-                    sstr = f.read().strip()
-                if sstr and sstr not in seen_strings:
-                    seen_strings.add(sstr)
-                    unique_sessions.append((a['first_name'] or 'بدون', a["phone"], sstr))
-            except Exception:
-                pass
-    
-    if not unique_sessions:
-        return await edit(e, "❌ لا توجد جلسات صالحة للاستخراج.", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
-
-    txt = "🔑 **جلسات تيليثون الفريدة (صافية وبدون تكرار):**\n\n"
-    for fname, phone, sstr in unique_sessions:
-        p_masked = mask_phone(phone)
-        txt += f"👤 <b>{fname}</b> | <code>{p_masked}</code>\n<tg-spoiler><code>{sstr}</code></tg-spoiler>\n\n"
-    
-    if len(txt) > 4000:
-        chunks = [txt[i:i+4000] for i in range(0, len(txt), 4000)]
-        for chunk in chunks:
-            await e.respond(chunk, parse_mode="html")
-        await edit(e, "✅ تم إرسال كافة الجلسات الصافية بنجاح بنظام الاقتباس المطوي والنصي!", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
-    else:
-        await edit(e, txt, buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]], parse_mode="html")
-    await e.answer("تم الاستخراج")
 
 @bot.on(events.CallbackQuery(data=b"adm_stats"))
 async def cb_stats(e):
@@ -1736,73 +1644,6 @@ async def cb_dev_add_admin(e):
     login_pending[e.sender_id] = {"step": "adm_add_admin_id"}
     await edit(e, "👤 أرسل الآن **ID المستخدم** الذي تريد ترقيته ليصبح أدمن:", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     await e.answer()
-
-@bot.on(events.CallbackQuery(data=b"dev_del_admin"))
-async def cb_dev_del_admin(e):
-    if not is_dev(e.sender_id):
-        return await e.answer("غير مصرح", alert=True)
-    admins = list_admins()
-    btns = []
-    for ad in admins:
-        if ad["user_id"] == DEV_ID:
-            continue
-        btns.append([Button.inline(f"حذف الأدمن: {ad['user_id']}", f"del_admin_{ad['user_id']}".encode(), style='danger')])
-    btns.append([Button.inline("رجوع", b"dev_back", style='primary')])
-    await edit(e, "اختر الأدمن المراد حذفه:", buttons=btns)
-    await e.answer()
-
-@bot.on(events.CallbackQuery(pattern=rb"^del_admin_(\d+)$"))
-async def cb_del_admin_one(e):
-    if not is_dev(e.sender_id):
-        return
-    aid = int(e.pattern_match.group(1))
-    remove_admin_db(aid)
-    await edit(e, f"✅ تم حذف الأدمن `{aid}` بنجاح.", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]], parse_mode="markdown")
-    await e.answer("تم الحذف")
-
-@bot.on(events.CallbackQuery(data=b"dev_add_session_btn"))
-async def cb_dev_add_session_btn(e):
-    if not is_dev(e.sender_id):
-        return await e.answer("غير مصرح", alert=True)
-    login_pending[e.sender_id] = {"step": "dev_add_session"}
-    await edit(e, "🔑 أرسل الآن **Session String** الخاص بحساب المطور:", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
-    await e.answer()
-
-@bot.on(events.CallbackQuery(data=b"dev_manage_sessions"))
-async def cb_dev_manage_sessions(e):
-    if not is_dev(e.sender_id):
-        return await e.answer("غير مصرح", alert=True)
-    c = db()
-    try:
-        dev_sessions = c.execute("SELECT * FROM dev_sessions").fetchall()
-    finally:
-        c.close()
-    
-    if not dev_sessions:
-        return await edit(e, "⚠️ لا توجد جلسات مطور مضافة حالياً.", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
-    
-    btns = []
-    for ds in dev_sessions:
-        ds_id = ds["account_id"]
-        ds_name = ds["first_name"] or "جلسة مطور"
-        btns.append([Button.inline(f"🗑️ حذف: {ds_name} ({ds_id})", f"del_dev_sess_{ds_id}".encode(), style='danger')])
-    btns.append([Button.inline("رجوع", b"dev_back", style='primary')])
-    await edit(e, "اختر جلسة المطور التي تريد حذفها:", buttons=btns)
-    await e.answer()
-
-@bot.on(events.CallbackQuery(pattern=rb"^del_dev_sess_(\d+)$"))
-async def cb_del_dev_sess_one(e):
-    if not is_dev(e.sender_id):
-        return
-    aid = int(e.pattern_match.group(1))
-    c = db()
-    try:
-        c.execute("DELETE FROM dev_sessions WHERE account_id=?", (aid,))
-        c.commit()
-    finally:
-        c.close()
-    await edit(e, f"✅ تم مسح جلسة المطور بنجاح.", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
-    await e.answer("تم المسح")
 
 @bot.on(events.CallbackQuery(data=b"dev_back"))
 async def cb_dev_back(e):
