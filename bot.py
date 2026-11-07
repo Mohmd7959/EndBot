@@ -6,10 +6,11 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.custom import Button
 from telethon.tl.functions.channels import GetParticipantRequest, JoinChannelRequest
-from telethon.tl.functions.messages import ImportChatInviteRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInviteRequest
 from telethon.tl.functions.phone import RequestCallRequest, DiscardCallRequest
 from telethon.tl.types import InputPhoneCall, PhoneCallProtocol
 from telethon.utils import get_peer_id
+from telethon.errors import UserAlreadyParticipantError, SessionPasswordNeededError, PhoneCodeInvalidError
 from pytgcalls import PyTgCalls, idle
 from pytgcalls.types import MediaStream, GroupCallConfig, AudioQuality, VideoQuality
 from config import *
@@ -385,7 +386,7 @@ async def respond(event, text, buttons=None, **kw):
 async def edit(event, text, buttons=None, **kw):
     try:
         await event.edit(text, buttons=buttons, **kw)
-    except MessageNotModifiedError:
+    except Exception:
         pass
 
 async def reject_if_not_subscribed(event):
@@ -421,7 +422,7 @@ def main_menu():
         [Button.inline("حذف حساب", b"del_account", style='danger')],
         [Button.inline("📂 ملف موحد لكل الحسابات", b"add_unified_video", style='primary')],
         [Button.inline("🎥 فيديو مخصص لكل حساب", b"add_video_menu", style='primary')],
-        [Button.inline("رابط الاتصال", b"set_chat", style='primary')],
+        [Button.inline("رابط الاتصال (كروب / قناة)", b"set_chat", style='primary')],
         [Button.inline("📞 الاتصال الخاص (يوزر / ID)", b"private_call_menu", style='success')],
         [Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')],
         [Button.inline("قائمة البث والتحكم", b"stream_menu", style='success')],
@@ -483,39 +484,41 @@ async def resolve_chat(uid, link):
             return None, f"تعذر: {type(ex).__name__}", None
 
     if "t.me/" in link or "telegram.me/" in link:
-        m = re.search(r't\.me/(?:joinchat/)?(\+?)([A-Za-z0-9_\-]+)', link)
-        if not m:
-            return None, "رابط غير صحيح", None
-        plus = m.group(1)
-        code = m.group(2)
-
-        if plus == "+" or "joinchat" in link or len(code) > 20:
+        if "t.me/+" in link or "telegram.me/+" in link or "joinchat" in link:
+            m = re.search(r't\.me/(?:joinchat/)?\+?([A-Za-z0-9_\-]+)', link)
+            if not m:
+                return None, "رابط دعوة غير صحيح", None
+            invite_code = m.group(1)
             try:
                 try:
-                    await cli(ImportChatInviteRequest(code))
+                    await cli(ImportChatInviteRequest(invite_code))
                 except UserAlreadyParticipantError:
                     pass
                 except Exception:
                     pass
 
-                from telethon.tl.functions.messages import CheckChatInviteRequest
-                info = await cli(CheckChatInviteRequest(code))
+                info = await cli(CheckChatInviteRequest(invite_code))
                 chat = getattr(info, 'chat', None)
                 if chat:
                     return get_peer_id(chat), getattr(chat, 'title', None) or str(chat.id), link
-                return None, "تم الانضمام لكن تعذر استخراج ID", None
+                return None, "تم الانضمام لكن تعذر استخراج ID الكروب", None
+            except Exception as ex:
+                return None, f"تعذر الانضمام بالرابط: {type(ex).__name__}", None
+
+        m = re.search(r't\.me/([A-Za-z0-9_]+)', link)
+        if m:
+            code = m.group(1)
+            try:
+                ent = await cli.get_entity("@" + code)
+                try:
+                    await cli(JoinChannelRequest(ent))
+                except UserAlreadyParticipantError:
+                    pass
+                except Exception:
+                    pass
+                return get_peer_id(ent), getattr(ent, 'title', None) or code, link
             except Exception as ex:
                 return None, f"تعذر: {type(ex).__name__}", None
-
-        try:
-            ent = await cli.get_entity("@" + code)
-            try:
-                await cli(JoinChannelRequest(ent))
-            except Exception:
-                pass
-            return get_peer_id(ent), getattr(ent, 'title', None) or code, link
-        except Exception as ex:
-            return None, f"تعذر: {type(ex).__name__}", None
 
     return None, "صيغة غير معروفة", None
 
@@ -535,7 +538,7 @@ async def cb_back(e):
         return await e.answer("غير مصرح", alert=True)
     try:
         await e.edit(MAIN_TEXT, buttons=main_menu())
-    except MessageNotModifiedError:
+    except Exception:
         pass
     await e.answer()
 
@@ -711,7 +714,7 @@ async def cb_set_chat(e):
     if not is_subscriber(e.sender_id):
         return await e.answer("غير مصرح", alert=True)
     login_pending[e.sender_id] = {"step": "chat"}
-    await edit(e, "ارسل رابط الاتصال:", buttons=back_button())
+    await edit(e, "🔗 **أرسل رابط الكروب أو القناة (أو رابط الدعوة مثل t.me/+...):**", buttons=back_button())
     await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"private_call_menu"))
@@ -872,7 +875,6 @@ async def on_message(e):
     if not e.is_private or e.out:
         return
     if e.text and e.text.startswith("/"):
-        txt = e.text.strip()
         return
 
     uid = e.sender_id
@@ -1055,7 +1057,7 @@ async def on_message(e):
                 await msg.delete()
             except Exception:
                 pass
-            await respond(e, f"✅ تم تشغيل البث بنجاح مع ({target_str}) وسيتم إنهاؤه تلقائياً فور انتهاء الفيديو!", buttons=back_button())
+            await respond(e, f"✅ تم تشغيل البث بنجاح مع ({target_str}) وسيتم إنهاء المكالمة تلقائياً فور انتهاء الفيديو!", buttons=back_button())
             
         except Exception as ex:
             try:
@@ -1137,17 +1139,17 @@ async def on_message(e):
 
     if step == "chat":
         link = (e.text or "").strip()
-        msg = await respond(e, "جاري التحقق والانضمام للرابط...")
+        msg = await respond(e, "⏳ جاري التحقق من الرابط والانضمام للكروب/القناة...")
         cid, result, invite_link = await resolve_chat(uid, link)
         try:
             await msg.delete()
         except Exception:
             pass
         if cid is None:
-            return await respond(e, f"تعذر: {result}", buttons=back_button())
+            return await respond(e, f"❌ تعذر: {result}", buttons=back_button())
         set_chat(uid, cid, result, invite_link or link)
         login_pending.pop(uid, None)
-        await respond(e, f"تم تعيين رابط الاتصال بنجاح:\n{result}\nID: {cid}", buttons=back_button())
+        await respond(e, f"✅ **تم تعيين رابط الاتصال بنجاح:**\n📌 العنوان: {result}\n🆔 ID الكروب: `{cid}`", buttons=back_button(), parse_mode="markdown")
         return
 
     if step == "adm_add_sub_id":
@@ -1367,7 +1369,10 @@ async def start_stream_for_account(uid, aid, chat_id, title, saved_link):
             if "t.me/+" in saved_link or "joinchat" in saved_link or len(saved_link) > 25:
                 m = re.search(r't\.me/(?:joinchat/)?\+?([A-Za-z0-9_\-]+)', saved_link)
                 if m:
-                    await cli(ImportChatInviteRequest(m.group(1)))
+                    try:
+                        await cli(ImportChatInviteRequest(m.group(1)))
+                    except UserAlreadyParticipantError:
+                        pass
                     joined = True
             else:
                 m = re.search(r't\.me/([A-Za-z0-9_]+)', saved_link)
@@ -1622,7 +1627,7 @@ async def cb_list_subs(e):
     subs = list_subscribers()
     b_target = b"dev_back" if is_dev(e.sender_id) else b"adm_back"
     if not subs:
-        return await edit(e, "لا يوجد مشتركون", buttons=[[Button.inline("رجوع", b_target, style='danger')]])
+        return await edit(e, "لا يوجد مشتركون", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     txt = "المشتركون:\n\n"
     for s in subs:
         uid = s["user_id"]
@@ -1630,7 +1635,7 @@ async def cb_list_subs(e):
         name = u["first_name"] if u else "غير معروف"
         days = days_left(uid)
         txt += f"الاسم: {name}\nID: {uid}\nمتبقي: {days} يوم\n\n"
-    await edit(e, txt[:4000], buttons=[[Button.inline("رجوع", b_target, style='danger')]])
+    await edit(e, txt[:4000], buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"adm_add_sub"))
@@ -1639,7 +1644,7 @@ async def cb_addsub(e):
         return await e.answer("غير مصرح", alert=True)
     login_pending[e.sender_id] = {"step": "adm_add_sub_id"}
     b_target = b"dev_back" if is_dev(e.sender_id) else b"adm_back"
-    await edit(e, "ارسل ID المستخدم:", buttons=[[Button.inline("رجوع", b_target, style='danger')]])
+    await edit(e, "ارسل ID المستخدم:", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"dev_add_sub_all"))
@@ -1657,7 +1662,7 @@ async def cb_delsub(e):
     subs = list_subscribers()
     b_target = b"dev_back" if is_dev(e.sender_id) else b"adm_back"
     if not subs:
-        return await edit(e, "لا يوجد مشتركون", buttons=[[Button.inline("رجوع", b_target, style='danger')]])
+        return await edit(e, "لا يوجد مشتركون", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     btns = []
     for s in subs:
         uid = s["user_id"]
@@ -1677,7 +1682,7 @@ async def cb_delsub_one(e):
     tid = int(e.pattern_match.group(1))
     remove_subscriber(tid)
     b_target = b"dev_back" if is_dev(e.sender_id) else b"adm_back"
-    await edit(e, f"تم حذف المشترك {tid}", buttons=[[Button.inline("رجوع", b_target, style='danger')]])
+    await edit(e, f"تم حذف المشترك {tid}", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     await e.answer("تم")
 
 @bot.on(events.CallbackQuery(data=b"adm_active"))
