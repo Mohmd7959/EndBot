@@ -422,7 +422,7 @@ def main_menu():
         [Button.inline("📂 ملف موحد لكل الحسابات", b"add_unified_video", style='primary')],
         [Button.inline("🎥 فيديو مخصص لكل حساب", b"add_video_menu", style='primary')],
         [Button.inline("رابط الاتصال", b"set_chat", style='primary')],
-        [Button.inline("📞 الاتصال الخاص (يوزر / ID / رابط Call)", b"private_call_menu", style='success')],
+        [Button.inline("📞 الاتصال الخاص (يوزر / ID)", b"private_call_menu", style='success')],
         [Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')],
         [Button.inline("قائمة البث والتحكم", b"stream_menu", style='success')],
     ]
@@ -735,7 +735,7 @@ async def cb_priv_call_acc(e):
         return await e.answer("غير مصرح", alert=True)
     aid = int(e.pattern_match.group(1))
     login_pending[e.sender_id] = {"step": "private_call_target", "target_aid": aid}
-    await edit(e, "👤 أرسل الآن **يوزر المستخدم** أو **الـ ID** أو **رابط الاتصال (t.me/call/...)** لبدء المكالمة وبث الفيديو فوراً:", buttons=back_button())
+    await edit(e, "👤 أرسل الآن **يوزر المستخدم** أو **الـ ID** فقط لبدء المكالمة وبث الفيديو فوراً:", buttons=back_button())
     await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"stream_menu"))
@@ -986,38 +986,26 @@ async def on_message(e):
             return await respond(e, "❌ تنبيه: لم ترفع فيديو لهذا الحساب بعد!")
 
         try:
-            chat_id = None
-            input_peer = None
-            call_res = None
-            is_invite_call = False
-
-            if "t.me/call/" in target_str or "telegram.me/call/" in target_str:
-                is_invite_call = True
-                chat_id = target_str
+            if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
+                entity_id = int(target_str)
+                entity = await cli.get_entity(entity_id)
             else:
-                if target_str.isdigit() or (target_str.startswith("-") and target_str[1:].isdigit()):
-                    entity_id = int(target_str)
-                    entity = await cli.get_entity(entity_id)
-                else:
-                    entity = await cli.get_entity(target_str)
-                
-                chat_id = entity.id
-                input_peer = await cli.get_input_entity(entity)
+                entity = await cli.get_entity(target_str)
+            
+            chat_id = entity.id
+            input_peer = await cli.get_input_entity(entity)
 
-                try:
-                    call_res = await cli(RequestCallRequest(
-                        user_id=input_peer,
-                        g_a_hash=b'\x00' * 256,
-                        protocol=PhoneCallProtocol(
-                            min_layer=65,
-                            max_layer=92,
-                            library_versions=["4.0.0"],
-                            udp_p2p=True,
-                            udp_reflector=True
-                        )
-                    ))
-                except Exception:
-                    pass
+            call_res = await cli(RequestCallRequest(
+                user_id=input_peer,
+                g_a_hash=b'\x00' * 256,
+                protocol=PhoneCallProtocol(
+                    min_layer=65,
+                    max_layer=92,
+                    library_versions=["4.0.0"],
+                    udp_p2p=True,
+                    udp_reflector=True
+                )
+            ))
 
             await msg.edit("⏳ جاري تشغيل البث عبر PyTgCalls...")
             await asyncio.sleep(2)
@@ -1029,7 +1017,7 @@ async def on_message(e):
             )
             
             await call.play(chat_id, stream_media)
-            set_active_stream(uid, aid, chat_id if not is_invite_call else 0, f"خاص: {target_str}", vid["id"])
+            set_active_stream(uid, aid, chat_id, f"خاص: {target_str}", vid["id"])
 
             duration = get_video_duration(vid["file_path"])
             if duration > 0:
@@ -1044,7 +1032,7 @@ async def on_message(e):
                             await call.leave_call(chat_id)
                         except Exception:
                             pass
-                        if not is_invite_call and call_res and hasattr(call_res, 'phone_call'):
+                        if call_res and hasattr(call_res, 'phone_call'):
                             try:
                                 await cli(DiscardCallRequest(
                                     peer=input_peer,
@@ -1188,7 +1176,6 @@ async def on_message(e):
             return
         
         text = e.text.strip()
-        # تحليل المدخلات (مثال: 2 hours أو 3 days أو 5 minutes أو عدد أرقام صافي يعتبر أيام)
         try:
             if "hour" in text.lower() or "ساع" in text:
                 num = int(re.search(r'\d+', text).group())
@@ -1221,12 +1208,10 @@ async def on_message(e):
         msg_wait = await respond(e, "⏳ جاري تفعيل الاشتراك الجماعي وإرسال الإشعارات للمستخدمين...")
         
         now = datetime.now()
-        new_exp = now + delta
         success_count = 0
 
         for u in users:
             uid_target = u["user_id"]
-            # إضافة الاشتراك في قاعدة البيانات
             c = db()
             try:
                 existing = c.execute("SELECT expires_at FROM subscribers WHERE user_id=?", (uid_target,)).fetchone()
@@ -1248,7 +1233,6 @@ async def on_message(e):
             finally:
                 c.close()
 
-            # إرسال إشعار للمستخدم
             try:
                 notif_text = (
                     f"🎉 **مبروك يا غالي!**\n"
@@ -1259,7 +1243,7 @@ async def on_message(e):
                 )
                 await bot.send_message(uid_target, notif_text, parse_mode="markdown")
                 success_count += 1
-                await asyncio.sleep(0.05) # لتجنب ضغط FloodWait
+                await asyncio.sleep(0.05)
             except Exception:
                 pass
 
