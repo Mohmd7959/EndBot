@@ -10,7 +10,7 @@ from telethon.tl.functions.messages import ImportChatInviteRequest, CheckChatInv
 from telethon.tl.types import User, InputPeerUser, MessageEntityBlockquote, MessageEntityCode
 from telethon.utils import get_peer_id
 from telethon.tl.functions.phone import DiscardCallRequest
-from telethon.tl.types import InputPhoneCall, PhoneCallDiscardReasonMissed
+from telethon.tl.types import InputPhoneCall, PhoneCallDiscardReasonMissed, PhoneCallDiscardReasonHangup, UpdatePhoneCall
 from telethon.errors import MessageNotModifiedError, UserAlreadyParticipantError, SessionPasswordNeededError, PhoneCodeInvalidError
 from pytgcalls import PyTgCalls, idle
 from pytgcalls.types import MediaStream, AudioQuality, VideoQuality
@@ -588,9 +588,8 @@ async def play_call_link(call, link, stream):
     )
 
 def _find_phone_call_ref(obj, depth=3, seen=None):
-    """يبحث داخل كائن PyTgCalls عن (id, access_hash) اللي يمثّل InputPhoneCall الخاص بمكالمة
-    خاصة لسا ما أحد رد عليها، عشان نقدر نستخدمها مع phone.discardCall (الطريقة الرسمية حسب
-    توثيق تيليجرام لإنهاء مكالمة لسا ما رد عليها الطرف الثاني من جهة المتصل نفسه)."""
+    """احتياطي فقط: يبحث داخل كائن PyTgCalls عن (id, access_hash) لو ما وصلنا أي تحديث رسمي
+    من تيليجرام يعطينا نفس القيمتين مباشرة (المسار العادي أدناه يعتمد على التحديث الرسمي)."""
     if seen is None:
         seen = set()
     if depth < 0 or obj is None or id(obj) in seen:
@@ -621,32 +620,32 @@ def _find_phone_call_ref(obj, depth=3, seen=None):
                 return r
     return None
 
-async def _force_hangup(cli, call, chat_id, uid, aid):
+async def _force_hangup(cli, call, chat_id, uid, aid, ref=None, reason=None):
     """ينهي المكالمة الخاصة فعلياً من جهتنا:
-    1) يحاول phone.discardCall (الطريقة الرسمية لإلغاء مكالمة لسا ترن وما أحد رد عليها).
+    1) phone.discardCall بالمرجع (id/access_hash) الحقيقي الجاي من تحديث تيليجرام نفسه إذا متوفر،
+       وإلا يحاول يلقاه داخل كائن PyTgCalls كحل احتياطي.
     2) احتياطياً يجرب leave_call/stop_stream من PyTgCalls.
-    يطبع بالكونسول تفاصيل كل محاولة، لأن إذا فشلت المحاولة الأولى نحتاج نعرف السبب بالضبط لنصلحه."""
-    ref = None
-    try:
-        ref = _find_phone_call_ref(call)
-    except Exception as ex:
-        print(f"[private_call] خطأ أثناء البحث عن مرجع المكالمة: {type(ex).__name__}: {ex}")
+    يطبع بالكونسول تفاصيل كل محاولة فاشلة."""
+    if not ref:
+        try:
+            ref = _find_phone_call_ref(call)
+        except Exception as ex:
+            print(f"[private_call] خطأ أثناء البحث عن مرجع المكالمة: {type(ex).__name__}: {ex}")
 
-    if ref:
+    if ref and ref[0] and ref[1]:
         call_id, access_hash = ref
         try:
             await cli(DiscardCallRequest(
                 peer=InputPhoneCall(id=call_id, access_hash=access_hash),
                 duration=0,
-                reason=PhoneCallDiscardReasonMissed(),
+                reason=reason or PhoneCallDiscardReasonHangup(),
                 connection_id=0
             ))
             print(f"[private_call] ✅ تم إنهاء المكالمة فعلياً عبر phone.discardCall (id={call_id})")
         except Exception as ex:
             print(f"[private_call] ❌ فشل phone.discardCall (id={call_id}): {type(ex).__name__}: {ex}")
     else:
-        print("[private_call] ⚠️ لم يُعثر على مرجع المكالمة (id/access_hash) داخل كائن PyTgCalls. "
-              "أرسل هذا السطر للمطور ليدقّق اسم الخاصية الصحيح بهذه النسخة.")
+        print("[private_call] ⚠️ لم يُعثر على مرجع المكالمة (id/access_hash).")
 
     for attempt in (
         lambda: call.leave_call(chat_id),
@@ -660,26 +659,72 @@ async def _force_hangup(cli, call, chat_id, uid, aid):
     remove_active_stream(uid, aid)
     auto_leave_tasks.pop((uid, aid), None)
 
-def schedule_private_hangup(uid, aid, cli, call, chat_id, duration, ring_margin=25):
-    """يراقب الاتصال الخاص وينهيه (decline/hangup) من جهة حسابك حتى ما يضل معلّق:
-    - مهلة = طول الفيديو + هامش للرنين (ring_margin) لأن التشغيل الفعلي يبدأ فقط بعد رد الطرف الآخر.
-    - إذا أوقف المستخدم البث يدوياً أثناء الانتظار، الدالة تتوقف فوراً بدون أي أثر إضافي.
-    - أهم إصلاح: مهما كانت طريقة الخروج من الحلقة، يتم استدعاء إنهاء الاتصال فعلياً قبل تنظيف الحالة
-      (الكود القديم كان أحياناً ينظّف الحالة الداخلية ويرجع بدون ما يأمر تيليجرام فعلياً بإنهاء الاتصال)."""
+def schedule_private_hangup(uid, aid, cli, call, chat_id, duration, max_wait_to_answer=300):
+    """يراقب المكالمة الخاصة اعتماداً على تحديثات تيليجرام الحقيقية (UpdatePhoneCall) بدل توقيت ثابت:
+    1) ينتظر فعلياً حتى يرد الطرف الآخر (حتى لو تأخر)، بدل افتراض مهلة رنين محدّدة سلفاً.
+    2) بمجرد الرد، يبدأ عدّ مدة الفيديو من لحظة الرد الحقيقية، فينهي المكالمة بالضبط لما تخلص
+       (مو قبلها بسبب تأخر الرد، ومو بعدها بوقت زيادة).
+    3) إذا الطرف الثاني رفض/أنهى المكالمة هو نفسه، تيليجرام ترسل تحديث بهذا فنتوقف فوراً بدون أي أمر إضافي.
+    max_wait_to_answer: سقف أمان بس (لو ما وصل أي تحديث إطلاقاً لسبب غير متوقع)، مو مهلة رنين فعلية."""
     cancel_auto_leave(uid, aid)
-    deadline = duration + ring_margin
+
+    answered = asyncio.Event()
+    discarded = asyncio.Event()
+    ref_holder = {"id": None, "access_hash": None}
+
+    async def _on_update(update):
+        pc = getattr(update, "phone_call", None)
+        if pc is None:
+            return
+        tname = type(pc).__name__
+        if tname in ("PhoneCallAccepted", "PhoneCall") and not answered.is_set():
+            ref_holder["id"] = getattr(pc, "id", None)
+            ref_holder["access_hash"] = getattr(pc, "access_hash", None)
+            answered.set()
+        elif tname == "PhoneCallDiscarded":
+            discarded.set()
+
+    cli.add_event_handler(_on_update, events.Raw(types=UpdatePhoneCall))
 
     async def _watch():
         try:
+            try:
+                waiters = [asyncio.ensure_future(answered.wait()), asyncio.ensure_future(discarded.wait())]
+                done, pending = await asyncio.wait_for(
+                    asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED),
+                    timeout=max_wait_to_answer
+                )
+                for p in pending:
+                    p.cancel()
+            except asyncio.TimeoutError:
+                pass
+
+            if discarded.is_set() and not answered.is_set():
+                return  # الطرف الثاني رفض المكالمة؛ تيليجرام أنهتها فعلياً من الجهتين
+
+            if not answered.is_set():
+                # لم يصلنا أي تحديث خلال المهلة القصوى (حالة غير متوقعة) — ننهي المكالمة نحن احتياطاً
+                await _force_hangup(cli, call, chat_id, uid, aid, ref=None, reason=PhoneCallDiscardReasonMissed())
+                return
+
             elapsed = 0
-            while elapsed < deadline:
+            while elapsed < duration + 1:
                 await asyncio.sleep(1)
                 elapsed += 1
                 if not get_active_stream(uid, aid):
-                    return  # تم إيقافه من مكان آخر (زر إيقاف يدوي) وتم إنهاؤه هناك بالفعل
+                    return  # أوقف يدوياً من مكان آخر وتم إنهاؤه هناك بالفعل
+                if discarded.is_set():
+                    return  # الطرف الثاني أنهى المكالمة بنفسه قبل انتهاء الفيديو
         except asyncio.CancelledError:
             raise
-        await _force_hangup(cli, call, chat_id, uid, aid)
+        finally:
+            try:
+                cli.remove_event_handler(_on_update, events.Raw)
+            except Exception:
+                pass
+        await _force_hangup(cli, call, chat_id, uid, aid,
+                             ref=(ref_holder["id"], ref_holder["access_hash"]),
+                             reason=PhoneCallDiscardReasonHangup())
 
     auto_leave_tasks[(uid, aid)] = asyncio.create_task(_watch())
 
