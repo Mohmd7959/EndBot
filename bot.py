@@ -739,8 +739,8 @@ def schedule_private_hangup(uid, aid, cli, call, chat_id, duration, max_wait_to_
     auto_leave_tasks[(uid, aid)] = asyncio.create_task(_watch())
 
 # ═════════════ تكرار الكام السريع (فتح / إغلاق / فلاش) ═════════════
-FLASH_ON_SECONDS = 0.01    # مدة ظهور الكام بكل لمحة
-FLASH_OFF_SECONDS = 0.01   # مدة الإغلاق بين اللمحات
+FLASH_ON_SECONDS = 0.8    # مدة ظهور الكام بكل لمحة
+FLASH_OFF_SECONDS = 0.8   # مدة الإغلاق بين اللمحات
 RESTART_LATENCY = 0.35     # وقت إعادة تشغيل البث التقريبي: نقدّم الصوت بمقداره عشان ما يرجع/يقفز الصوت
 
 cam_state = {}      # (uid, aid) -> True = الكام مفتوحة / False = مغلقة
