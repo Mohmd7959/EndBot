@@ -748,6 +748,7 @@ _asset_locks = {}   # قفل تجهيز ملف الفلاش
 flash_running = set()   # الحسابات اللي فلاشها شغال حالياً
 flash_stop = set()      # طلبات إيقاف التكرار
 flash_pending = set()   # مستخدمين جاري انضمام حساباتهم قبل بدء الفلاش
+stop_requested = set()  # مستخدمين ضغطوا إيقاف أثناء الانضمام
 
 def _cam_lock(uid, aid):
     key = (uid, aid)
@@ -851,6 +852,8 @@ async def _cam_play(uid, aid, mode, silent_lock=False):
             return 0.0
 
     async def _play(path, mode_kind):
+        if not get_active_stream(uid, aid):
+            return None   # البث انتهى/اتوقف: لا نشغّل شي عشان ما يرجع للاتصال
         kwargs = {"audio_parameters": AudioQuality.STUDIO}
         if mode_kind == "off":
             kwargs["video_flags"] = MediaStream.Flags.IGNORE
@@ -915,6 +918,40 @@ async def _cam_play(uid, aid, mode, silent_lock=False):
             return False, type(err).__name__
         cam_state[(uid, aid)] = False
         return True, "تم"
+
+async def hard_stop_account(uid, aid, call, chat_id):
+    """ينزّل الحساب نهائياً حتى لو الفلاش/الكام شغالين، وما يخليه يرجع للاتصال."""
+    key = (uid, aid)
+    remove_active_stream(uid, aid)   # أي تشغيل جديد يتوقف فوراً (الحارس)
+    cancel_auto_leave(uid, aid)
+    flash_stop.add(key)
+
+    async def _leave():
+        if call is None:
+            return
+        try:
+            await call.leave_call(chat_id)
+        except Exception:
+            pass
+
+    await _leave()                    # نزول فوري
+    lock = _cam_lock(uid, aid)
+    got = False
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=4)   # ننتظر نهاية أي تشغيل جاري
+        got = True
+    except Exception:
+        pass
+    try:
+        await _leave()                # نزول ثاني يلتقط أي رجوع متأخر
+        await asyncio.sleep(0.3)
+        await _leave()
+    finally:
+        if got:
+            lock.release()
+        flash_stop.discard(key)
+        flash_running.discard(key)
+        cam_state.pop(key, None)
 
 async def toggle_camera(uid, aid):
     """يبدّل الكام (فتح/إغلاق). يرجع (ok, is_on_now, msg)."""
@@ -2103,13 +2140,11 @@ async def cb_stop_one(e):
     st = get_state(uid)
     call = st["calls"].get(aid)
     active = get_active_stream(uid, aid)
-    if call and active:
-        try:
-            await call.leave_call(active["chat_id"])
-        except Exception:
-            pass
-    cancel_auto_leave(uid, aid)
-    remove_active_stream(uid, aid)
+    if active:
+        await hard_stop_account(uid, aid, call, active["chat_id"])
+    else:
+        cancel_auto_leave(uid, aid)
+        remove_active_stream(uid, aid)
     await edit(e, "⏹️ تم إيقاف البث ونزول الحساب فوراً.", buttons=back_button())
     await e.answer("تم النزول والإيقاف")
 
@@ -2164,16 +2199,12 @@ async def cb_stop_all(e):
     st = get_state(uid)
     active_streams = get_all_active_streams_for_user(uid)
     
+    if uid in flash_pending:
+        stop_requested.add(uid)   # الحسابات لسا تنضم: ننزلهم أول ما يخلصون
+
     async def stop_single(active):
         aid = active["account_id"]
-        call = st["calls"].get(aid)
-        if call:
-            try:
-                await call.leave_call(active["chat_id"])
-            except Exception:
-                pass
-        cancel_auto_leave(uid, aid)
-        remove_active_stream(uid, aid)
+        await hard_stop_account(uid, aid, st["calls"].get(aid), active["chat_id"])
 
     if active_streams:
         await asyncio.gather(*(stop_single(s) for s in active_streams), return_exceptions=True)
@@ -2318,12 +2349,8 @@ async def cb_stopall(e):
         st = get_state(s["user_id"])
         c_obj = st["calls"].get(s["account_id"])
         if c_obj:
-            try:
-                await c_obj.leave_call(s["chat_id"])
-                count += 1
-            except Exception:
-                pass
-        remove_active_stream(s["user_id"], s["account_id"])
+            count += 1
+        await hard_stop_account(s["user_id"], s["account_id"], c_obj, s["chat_id"])
     await edit(e, f"تم إيقاف عدد {count} اتصال نشط عام.", buttons=[[Button.inline("رجوع", b"dev_back", style='danger')]])
     await e.answer("تم الإيقاف")
 
@@ -2502,6 +2529,7 @@ async def _refresh_stream_menu(e, uid):
 async def _flash_all_pipeline(e, uid, ch, accs):
     """ينضم بالحسابات اللي مو شغالة (إن وجدت) وأول ما ينضمون يبدأ الفتح والإغلاق فوراً."""
     flash_pending.add(uid)
+    stop_requested.discard(uid)
     ok_aids = []
     try:
         active = {s["account_id"] for s in get_all_active_streams_for_user(uid)}
@@ -2537,6 +2565,13 @@ async def _flash_all_pipeline(e, uid, ch, accs):
                     pass
     finally:
         flash_pending.discard(uid)
+    if uid in stop_requested:
+        stop_requested.discard(uid)
+        st = get_state(uid)
+        for a in ok_aids:
+            s_ = get_active_stream(uid, a)
+            await hard_stop_account(uid, a, st["calls"].get(a), s_["chat_id"] if s_ else ch["chat_id"])
+        return
     if not ok_aids:
         return await _refresh_stream_menu(e, uid)
     await _run_flash(e, uid, ok_aids, _refresh_stream_menu)
