@@ -739,11 +739,14 @@ def schedule_private_hangup(uid, aid, cli, call, chat_id, duration, max_wait_to_
     auto_leave_tasks[(uid, aid)] = asyncio.create_task(_watch())
 
 # ═════════════ تكرار الكام السريع (فتح / إغلاق / فلاش) ═════════════
-FLASH_SECONDS = 0.25   # مدة ظهور الكام بالفلاش السريع
+FLASH_ON_SECONDS = 0.25    # مدة ظهور الكام بكل لمحة
+FLASH_OFF_SECONDS = 0.25   # مدة الإغلاق بين اللمحات
 
 cam_state = {}      # (uid, aid) -> True = الكام مفتوحة / False = مغلقة
 cam_locks = {}      # قفل لكل حساب عشان الضغطات السريعة ما تتداخل
 _asset_locks = {}   # قفل تجهيز ملف الفلاش
+flash_running = set()   # الحسابات اللي فلاشها شغال حالياً
+flash_stop = set()      # طلبات إيقاف التكرار
 
 def _cam_lock(uid, aid):
     key = (uid, aid)
@@ -811,12 +814,15 @@ def cam_menu_buttons(uid, back_data=b"stream_menu"):
         lbl = f"📷 {name}: {'🟢 مفتوحة' if on else '🔴 مغلقة'}"
         rows.append([
             Button.inline(lbl, f"cam_toggle_{aid}".encode(), style='danger' if on else 'success'),
-            Button.inline("⚡ فلاش", f"cam_flash_{aid}".encode(), style='primary'),
+            Button.inline("⏹ إيقاف الفلاش" if (uid, aid) in flash_running else "⚡ فلاش متكرر",
+                          f"cam_flash_{aid}".encode(),
+                          style='danger' if (uid, aid) in flash_running else 'primary'),
         ])
-    if len(streams) > 1:
+    if streams:
         rows.append([
             Button.inline("📷 فتح / إغلاق الكل", b"cam_toggle_all", style='primary'),
-            Button.inline("⚡ فلاش للكل", b"cam_flash_all", style='primary'),
+            Button.inline("⏹ إيقاف الفلاش للكل" if any((uid, s["account_id"]) in flash_running for s in streams) else "⚡ فلاش متكرر للكل",
+                          b"cam_flash_all", style='danger'),
         ])
     rows.append([Button.inline("رجوع", back_data, style='danger')])
     return rows
@@ -870,12 +876,24 @@ async def _cam_play(uid, aid, mode, silent_lock=False):
             asset = await ensure_flash_asset(vid)
             if not asset:
                 return False, "فشل تجهيز ملف الكام"
-            err = await _play(asset, "flash")
-            if err:
-                return False, type(err).__name__
-            await asyncio.sleep(FLASH_SECONDS)
-            err = await _play(vid["file_path"], "off")
-            cam_state[(uid, aid)] = False
+            key = (uid, aid)
+            flash_stop.discard(key)
+            err = None
+            while True:  # تكرار تلقائي لين تضغط إيقاف أو ينتهي البث
+                if key in flash_stop or not get_active_stream(uid, aid):
+                    break
+                err = await _play(asset, "flash")
+                if err:
+                    break
+                await asyncio.sleep(FLASH_ON_SECONDS)
+                err = await _play(vid["file_path"], "off")
+                if err:
+                    break
+                if key in flash_stop:
+                    break
+                await asyncio.sleep(FLASH_OFF_SECONDS)
+            flash_stop.discard(key)
+            cam_state[key] = False
             return (err is None), ("تم" if err is None else type(err).__name__)
 
         if mode == "full":
@@ -904,7 +922,16 @@ async def toggle_camera(uid, aid):
     return ok, (turn_on if ok else not turn_on), msg
 
 async def flash_camera(uid, aid):
-    return await _cam_play(uid, aid, "flash")
+    """فلاش متكرر (فتح/إغلاق عدة مرات). إذا كان شغال وضغطت مرة ثانية يوقفه."""
+    key = (uid, aid)
+    if key in flash_running:
+        flash_stop.add(key)
+        return True, "تم إيقاف التكرار"
+    flash_running.add(key)
+    try:
+        return await _cam_play(uid, aid, "flash")
+    finally:
+        flash_running.discard(key)
 
 async def respond(event, text, buttons=None, **kw):
     try:
@@ -2406,17 +2433,31 @@ async def cb_cam_toggle(e):
     await e.answer("📷 مفتوحة" if on else "📷 مغلقة")
     asyncio.create_task(_refresh_cam_menu(e, uid))
 
+async def _run_flash(e, uid, aids):
+    job = asyncio.gather(*[flash_camera(uid, a) for a in aids], return_exceptions=True)
+    await asyncio.sleep(0.4)
+    await _refresh_cam_menu(e, uid)   # يظهر زر الإيقاف
+    results = await job
+    fails = [r[1] for r in results if isinstance(r, tuple) and not r[0]]
+    fails += [type(r).__name__ for r in results if not isinstance(r, tuple)]
+    if fails:
+        try:
+            await e.respond(f"❌ فشل الفلاش: {fails[0]}")
+        except Exception:
+            pass
+    await _refresh_cam_menu(e, uid)
+
 @bot.on(events.CallbackQuery(pattern=rb"^cam_flash_(\d+)$"))
 async def cb_cam_flash(e):
     uid = e.sender_id
     if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
     aid = int(e.pattern_match.group(1))
-    ok, msg = await flash_camera(uid, aid)
-    if not ok:
-        return await e.answer(f"❌ {msg}", alert=True)
-    await e.answer("⚡")
-    asyncio.create_task(_refresh_cam_menu(e, uid))
+    if not get_active_stream(uid, aid):
+        return await e.answer("لا يوجد بث شغال", alert=True)
+    stopping = (uid, aid) in flash_running
+    await e.answer("⏹ جاري الإيقاف" if stopping else "⚡")
+    asyncio.create_task(_run_flash(e, uid, [aid]))
 
 @bot.on(events.CallbackQuery(data=b"cam_toggle_all"))
 async def cb_cam_toggle_all(e):
@@ -2439,10 +2480,14 @@ async def cb_cam_flash_all(e):
     streams = get_all_active_streams_for_user(uid)
     if not streams:
         return await e.answer("لا يوجد بث شغال حالياً", alert=True)
-    results = await asyncio.gather(*[flash_camera(uid, s["account_id"]) for s in streams], return_exceptions=True)
-    done = sum(1 for r in results if isinstance(r, tuple) and r[0])
-    await e.answer(f"⚡ {done}")
-    asyncio.create_task(_refresh_cam_menu(e, uid))
+    aids = [s["account_id"] for s in streams]
+    running = [a for a in aids if (uid, a) in flash_running]
+    if running:
+        await e.answer("⏹ جاري الإيقاف")
+        asyncio.create_task(_run_flash(e, uid, running))   # الضغط على الشغال يوقفه
+        return
+    await e.answer(f"⚡ {len(aids)}")
+    asyncio.create_task(_run_flash(e, uid, aids))
 
 @bot.on(events.CallbackQuery(data=b"dev_back"))
 async def cb_dev_back(e):
