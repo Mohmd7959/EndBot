@@ -738,6 +738,41 @@ def schedule_private_hangup(uid, aid, cli, call, chat_id, duration, max_wait_to_
 
     auto_leave_tasks[(uid, aid)] = asyncio.create_task(_watch())
 
+# ═════════════ تحكم مستوى الصوت أثناء البث (متل بوت كام) ═════════════
+VOLUME_LEVELS = [0, 50, 100, 150, 200, 300, 400, 600, 800, 1000, 1200, 1500, 2000, 2500, 3000]
+
+def volume_menu_buttons(back_data=b"stream_menu"):
+    rows = []
+    row = []
+    for lvl in VOLUME_LEVELS:
+        row.append(Button.inline(f"{lvl}%", f"vol_set_{lvl}".encode(), style='danger' if lvl == 800 else 'primary'))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([Button.inline("✏️ إدخال مستوى 0-3000", b"vol_manual", style='primary')])
+    rows.append([Button.inline("رجوع", back_data, style='danger')])
+    return rows
+
+async def apply_volume_to_user_streams(uid, percent):
+    """يطبّق مستوى الصوت على كل البثوث الشغالة حالياً لهذا المستخدم (كل الحسابات المتصلة)."""
+    streams = get_all_active_streams_for_user(uid)
+    st = get_state(uid)
+    ok, fail = 0, 0
+    for s in streams:
+        call = st["calls"].get(s["account_id"])
+        if not call:
+            fail += 1
+            continue
+        try:
+            await call.change_volume_call(s["chat_id"], percent)
+            ok += 1
+        except Exception as ex:
+            fail += 1
+            print(f"[volume] ❌ فشل ضبط الصوت لحساب {s['account_id']}: {type(ex).__name__}: {ex}")
+    return ok, fail
+
 async def respond(event, text, buttons=None, **kw):
     try:
         return await event.respond(text, buttons=buttons, reply_to=event.message.id, **kw)
@@ -1710,6 +1745,17 @@ async def on_message(e):
         await respond(e, f"✅ تم حفظ جلسة المطور: {me.first_name} (`{me.id}`)", buttons=[[Button.inline("رجوع", b"dev_sessions_menu", style='danger')]], parse_mode="markdown")
         return
 
+    if step == "vol_manual_input":
+        login_pending.pop(uid, None)
+        txt = (e.text or "").strip()
+        if not txt.isdigit() or not (0 <= int(txt) <= 3000):
+            return await respond(e, "رقم غير صالح، أرسل رقم بين 0 و 3000.")
+        percent = int(txt)
+        ok, fail = await apply_volume_to_user_streams(uid, percent)
+        if ok == 0 and fail == 0:
+            return await respond(e, "لا يوجد بث شغال حالياً", buttons=volume_menu_buttons())
+        return await respond(e, f"🔊 تم ضبط مستوى الصوت: {percent}%", buttons=volume_menu_buttons())
+
     if step == "adm_add_admin_id":
         login_pending.pop(e.sender_id, None)
         if not is_dev(e.sender_id):
@@ -1886,6 +1932,7 @@ async def cb_start_one_norm(e):
     success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
     if success:
         await edit(e, f"✅ تم بدء التشغيل في: {ch['chat_title']} (سينزل تلقائياً فور انتهاء الفيديو)", buttons=back_button())
+        await e.respond("🔊 تحكم بمستوى الصوت أثناء البث:", buttons=volume_menu_buttons())
     else:
         await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
 
@@ -1944,6 +1991,8 @@ async def cb_start_all_normal(e):
             results.append(f"حساب {acc_name}: ❌ فشل ({err_msg})")
 
     await edit(e, "⚡ نتائج التشغيل الفوري المتزامن:\n\n" + "\n".join(results), buttons=back_button())
+    if any(isinstance(o, tuple) and o[0] for o in outcomes):
+        await e.respond("🔊 تحكم بمستوى الصوت أثناء البث (لكل الحسابات الشغالة):", buttons=volume_menu_buttons())
 
 @bot.on(events.CallbackQuery(data=b"stop_all_streams"))
 async def cb_stop_all(e):
@@ -2206,6 +2255,31 @@ async def cb_dev_del_session(e):
     finally:
         c.close()
     await edit(e, "✅ تم حذف جلسة المطور.", buttons=[[Button.inline("رجوع", b"dev_sessions_menu", style='primary')]])
+    await e.answer()
+
+@bot.on(events.CallbackQuery(pattern=rb"^vol_set_(\d+)$"))
+async def cb_vol_set(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    percent = int(e.pattern_match.group(1))
+    ok, fail = await apply_volume_to_user_streams(uid, percent)
+    if ok == 0 and fail == 0:
+        await e.answer("لا يوجد بث شغال حالياً", alert=True)
+        return
+    await e.answer(f"تم ضبط مستوى الصوت: {percent}%")
+    try:
+        await edit(e, f"🔊 تم ضبط مستوى الصوت: {percent}%", buttons=volume_menu_buttons())
+    except Exception:
+        pass
+
+@bot.on(events.CallbackQuery(data=b"vol_manual"))
+async def cb_vol_manual(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    login_pending[uid] = {"step": "vol_manual_input"}
+    await edit(e, "أرسل رقم مستوى الصوت (0 - 3000):", buttons=[[Button.inline("رجوع", b"stream_menu", style='danger')]])
     await e.answer()
 
 @bot.on(events.CallbackQuery(data=b"dev_back"))
