@@ -739,8 +739,9 @@ def schedule_private_hangup(uid, aid, cli, call, chat_id, duration, max_wait_to_
     auto_leave_tasks[(uid, aid)] = asyncio.create_task(_watch())
 
 # ═════════════ تكرار الكام السريع (فتح / إغلاق / فلاش) ═════════════
-FLASH_ON_SECONDS = 0.08    # مدة ظهور الكام بكل لمحة
-FLASH_OFF_SECONDS = 0.03   # مدة الإغلاق بين اللمحات
+FLASH_ON_SECONDS = 0.01    # مدة ظهور الكام بكل لمحة
+FLASH_OFF_SECONDS = 0.01   # مدة الإغلاق بين اللمحات
+RESTART_LATENCY = 0.35     # وقت إعادة تشغيل البث التقريبي: نقدّم الصوت بمقداره عشان ما يرجع/يقفز الصوت
 
 cam_state = {}      # (uid, aid) -> True = الكام مفتوحة / False = مغلقة
 cam_locks = {}      # قفل لكل حساب عشان الضغطات السريعة ما تتداخل
@@ -829,7 +830,7 @@ def cam_menu_buttons(uid, back_data=b"stream_menu"):
     rows.append([Button.inline("رجوع", back_data, style='danger')])
     return rows
 
-async def _cam_play(uid, aid, mode, silent_lock=False):
+async def _cam_play(uid, aid, mode, silent_lock=False, already_on=False):
     """mode: off = بدون كام | full = كام كاملة | flash = كام صغيرة ثم تنغلق. يرجع (ok, msg)."""
     s = get_active_stream(uid, aid)
     if not s:
@@ -861,13 +862,13 @@ async def _cam_play(uid, aid, mode, silent_lock=False):
             kwargs["video_parameters"] = VideoQuality.SD_360p
         else:
             kwargs["video_parameters"] = VideoQuality.HD_720p
-        off = int(_offset())
+        off = _offset() + RESTART_LATENCY
         last = None
-        for use_off in ((True, False) if off > 0 else (False,)):
+        for use_off in ((True, False) if off > 0.5 else (False,)):
             try:
                 kw = dict(kwargs)
                 if use_off:
-                    kw["ffmpeg_parameters"] = f"-ss {off}"
+                    kw["ffmpeg_parameters"] = f"-ss {off:.3f}"
                 await call.play(chat_id, MediaStream(path, **kw))
                 return None
             except Exception as ex:
@@ -883,14 +884,17 @@ async def _cam_play(uid, aid, mode, silent_lock=False):
             key = (uid, aid)
             flash_stop.discard(key)
             err = None
+            skip_on = already_on   # الحساب توه صاعد بكام الفلاش، فنبدأ بالإغلاق بدون إعادة تشغيل
             while True:  # تكرار تلقائي لين تضغط إيقاف أو ينتهي البث
                 if key in flash_stop or not get_active_stream(uid, aid):
                     break
-                err = await _play(asset, "flash")
-                if err:
-                    break
+                if not skip_on:
+                    err = await _play(asset, "flash")
+                    if err:
+                        break
+                skip_on = False
                 await asyncio.sleep(FLASH_ON_SECONDS)
-                err = await _play(vid["file_path"], "off")
+                err = await _play(asset, "off")   # نفس الملف الخفيف: إعادة التشغيل أسرع والصوت أقل تقطيعاً
                 if err:
                     break
                 if key in flash_stop:
@@ -918,6 +922,97 @@ async def _cam_play(uid, aid, mode, silent_lock=False):
             return False, type(err).__name__
         cam_state[(uid, aid)] = False
         return True, "تم"
+
+flash_pending_n = {}
+
+def _pend_add(uid, n):
+    flash_pending_n[uid] = flash_pending_n.get(uid, 0) + n
+    flash_pending.add(uid)
+
+def _pend_done(uid):
+    n = flash_pending_n.get(uid, 1) - 1
+    if n <= 0:
+        flash_pending_n.pop(uid, None)
+        flash_pending.discard(uid)
+    else:
+        flash_pending_n[uid] = n
+
+async def flash_join_account(uid, aid, ch):
+    """انضمام سريع ومستقل للفلاش: بدون بوابة تزامن وبدون انتظار باقي الحسابات.
+    يدخل الاتصال مباشرة بفيديو الفلاش الصغير (ما يشغّل الفيديو الأصلي أولاً)."""
+    chat_id = ch["chat_id"]
+    title = ch["chat_title"]
+    saved_link = ch.get("invite_link")
+    if chat_id == 0:
+        return False, "الفلاش ما يدعم رابط call"
+    acc = get_account(uid, aid)
+    if not acc:
+        return False, "الحساب غير موجود"
+    vid = get_video(uid, aid)
+    if not vid or not os.path.exists(vid["file_path"]):
+        return False, "لا يوجد فيديو مرفق للحساب"
+
+    asset_task = asyncio.create_task(ensure_flash_asset(vid))   # يتجهز أثناء الانضمام
+    try:
+        cli, call = await ensure_client(uid, aid)
+    except Exception as ex:
+        asset_task.cancel()
+        return False, f"فشل تشغيل عميل تيليجرام: {ex}"
+
+    joined = False
+    try:
+        await cli(GetParticipantRequest(channel=chat_id, participant=aid))
+        joined = True
+    except Exception:
+        joined = False
+
+    join_err = None
+    if not joined and saved_link:
+        try:
+            if "t.me/+" in saved_link or "joinchat" in saved_link or len(saved_link) > 25:
+                m = re.search(r't\.me/(?:joinchat/)?\+?([A-Za-z0-9_\-]+)', saved_link)
+                if m:
+                    try:
+                        await cli(ImportChatInviteRequest(m.group(1)))
+                    except UserAlreadyParticipantError:
+                        pass
+                    joined = True
+            else:
+                m = re.search(r't\.me/([A-Za-z0-9_]+)', saved_link)
+                if m:
+                    ent = await cli.get_entity("@" + m.group(1))
+                    try:
+                        await cli(JoinChannelRequest(ent))
+                    except UserAlreadyParticipantError:
+                        pass
+                    joined = True
+        except Exception as ex:
+            join_err = ex
+    if not joined:
+        asset_task.cancel()
+        if join_err:
+            return False, f"تعذر الانضمام للمجموعة: {type(join_err).__name__}"
+        return False, "الحساب ليس عضواً في المجموعة"
+
+    asset = await asset_task
+    if not asset:
+        return False, "فشل تجهيز ملف الكام"
+
+    last_err = None
+    for attempt in range(2):
+        try:
+            await call.play(chat_id, MediaStream(asset, audio_parameters=AudioQuality.STUDIO,
+                                                 video_parameters=VideoQuality.SD_360p))
+            set_active_stream(uid, aid, chat_id, title, vid["id"])
+            schedule_auto_leave(uid, aid, call, chat_id, get_video_duration(vid["file_path"]))
+            cam_state[(uid, aid)] = True
+            return True, "تم"
+        except Exception as ex:
+            last_err = ex
+            print(f"[flash_join] ❌ محاولة {attempt + 1} فشلت لحساب {aid}: {type(ex).__name__}: {ex}")
+            if attempt == 0:
+                await asyncio.sleep(0.5)
+    return False, f"خطأ الانضمام: {type(last_err).__name__}"
 
 async def hard_stop_account(uid, aid, call, chat_id):
     """ينزّل الحساب نهائياً حتى لو الفلاش/الكام شغالين، وما يخليه يرجع للاتصال."""
@@ -959,7 +1054,7 @@ async def toggle_camera(uid, aid):
     ok, msg = await _cam_play(uid, aid, "full" if turn_on else "off")
     return ok, (turn_on if ok else not turn_on), msg
 
-async def flash_camera(uid, aid):
+async def flash_camera(uid, aid, already_on=False):
     """فلاش متكرر (فتح/إغلاق عدة مرات). إذا كان شغال وضغطت مرة ثانية يوقفه."""
     key = (uid, aid)
     if key in flash_running:
@@ -967,7 +1062,7 @@ async def flash_camera(uid, aid):
         return True, "تم إيقاف التكرار"
     flash_running.add(key)
     try:
-        return await _cam_play(uid, aid, "flash")
+        return await _cam_play(uid, aid, "flash", already_on=already_on)
     finally:
         flash_running.discard(key)
 
@@ -2526,55 +2621,56 @@ async def _refresh_stream_menu(e, uid):
     except Exception:
         pass
 
-async def _flash_all_pipeline(e, uid, ch, accs):
-    """ينضم بالحسابات اللي مو شغالة (إن وجدت) وأول ما ينضمون يبدأ الفتح والإغلاق فوراً."""
-    flash_pending.add(uid)
-    stop_requested.discard(uid)
-    ok_aids = []
+async def _flash_join_and_run(e, uid, acc, ch):
+    """حساب واحد: ينضم ويبدأ الفلاش فوراً أول ما يصعد، بدون انتظار باقي الحسابات."""
+    aid = acc["account_id"]
+    name = acc["first_name"] if acc["first_name"] else mask_phone(acc["phone"])
     try:
-        active = {s["account_id"] for s in get_all_active_streams_for_user(uid)}
-        ok_aids = [a["account_id"] for a in accs if a["account_id"] in active]
-        missing = [a for a in accs if a["account_id"] not in active]
-        if missing:
-            try:
-                await edit(e, "⚡ جاري انضمام الحسابات... أول ما ينضمون يبدأ الفلاش مباشرة",
-                           buttons=[[Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')]])
-            except Exception:
-                pass
-            gate = _SyncGate(len(missing))
-
-            async def _join(acc):
-                aid = acc["account_id"]
-                vid = get_video(uid, aid)
-                if vid and os.path.exists(vid["file_path"]):
-                    asyncio.create_task(ensure_flash_asset(vid))   # يتجهز أثناء الانضمام
-                return await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"), sync_gate=gate)
-
-            outcomes = await asyncio.gather(*[_join(a) for a in missing], return_exceptions=True)
-            fails = []
-            for acc, o in zip(missing, outcomes):
-                name = acc["first_name"] if acc["first_name"] else mask_phone(acc["phone"])
-                if isinstance(o, tuple) and o[0]:
-                    ok_aids.append(acc["account_id"])
-                else:
-                    fails.append(f"{name}: {o[1] if isinstance(o, tuple) else 'خطأ غير متوقع'}")
-            if fails:
-                try:
-                    await e.respond("❌ حسابات فشل انضمامها:\n" + "\n".join(fails))
-                except Exception:
-                    pass
+        ok, msg = await flash_join_account(uid, aid, ch)
+    except Exception as ex:
+        ok, msg = False, type(ex).__name__
     finally:
-        flash_pending.discard(uid)
-    if uid in stop_requested:
-        stop_requested.discard(uid)
-        st = get_state(uid)
-        for a in ok_aids:
-            s_ = get_active_stream(uid, a)
-            await hard_stop_account(uid, a, st["calls"].get(a), s_["chat_id"] if s_ else ch["chat_id"])
+        _pend_done(uid)
+    if not ok:
+        try:
+            await e.respond(f"❌ {name}: {msg}")
+        except Exception:
+            pass
         return
-    if not ok_aids:
-        return await _refresh_stream_menu(e, uid)
-    await _run_flash(e, uid, ok_aids, _refresh_stream_menu)
+    if uid in stop_requested:   # ضغط إيقاف أثناء الانضمام
+        s_ = get_active_stream(uid, aid)
+        await hard_stop_account(uid, aid, get_state(uid)["calls"].get(aid), s_["chat_id"] if s_ else ch["chat_id"])
+        return
+    asyncio.create_task(_refresh_stream_menu(e, uid))
+    ok2, msg2 = await flash_camera(uid, aid, already_on=True)   # يبدأ بإغلاق ثم فتح... تكرار
+    if not ok2:
+        try:
+            await e.respond(f"❌ {name}: فشل الفلاش ({msg2})")
+        except Exception:
+            pass
+    await _refresh_stream_menu(e, uid)
+
+async def _flash_all_pipeline(e, uid, ch, accs):
+    stop_requested.discard(uid)
+    active = {s["account_id"] for s in get_all_active_streams_for_user(uid)}
+    live = [a["account_id"] for a in accs if a["account_id"] in active]
+    missing = [a for a in accs if a["account_id"] not in active]
+    tasks = []
+    if live:
+        tasks.append(_run_flash(e, uid, live, _refresh_stream_menu))
+    if missing:
+        _pend_add(uid, len(missing))
+        try:
+            await edit(e, "⚡ جاري الانضمام... كل حساب يبدأ فلاش أول ما يصعد",
+                       buttons=[[Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')]])
+        except Exception:
+            pass
+        for acc in missing:
+            tasks.append(_flash_join_and_run(e, uid, acc, ch))
+    try:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    finally:
+        stop_requested.discard(uid)
 
 @bot.on(events.CallbackQuery(data=b"menu_flash_all"))
 async def cb_menu_flash_all(e):
