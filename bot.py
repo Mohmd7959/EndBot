@@ -739,8 +739,8 @@ def schedule_private_hangup(uid, aid, cli, call, chat_id, duration, max_wait_to_
     auto_leave_tasks[(uid, aid)] = asyncio.create_task(_watch())
 
 # ═════════════ تكرار الكام السريع (فتح / إغلاق / فلاش) ═════════════
-FLASH_ON_SECONDS = 0.25    # مدة ظهور الكام بكل لمحة
-FLASH_OFF_SECONDS = 0.25   # مدة الإغلاق بين اللمحات
+FLASH_ON_SECONDS = 0.08    # مدة ظهور الكام بكل لمحة
+FLASH_OFF_SECONDS = 0.03   # مدة الإغلاق بين اللمحات
 
 cam_state = {}      # (uid, aid) -> True = الكام مفتوحة / False = مغلقة
 cam_locks = {}      # قفل لكل حساب عشان الضغطات السريعة ما تتداخل
@@ -806,6 +806,10 @@ async def prewarm_flash_assets(uid):
 def cam_menu_buttons(uid, back_data=b"stream_menu"):
     rows = []
     streams = get_all_active_streams_for_user(uid)
+    if streams:
+        any_run = any((uid, s["account_id"]) in flash_running for s in streams)
+        rows.append([Button.inline("⏹ إيقاف Flash" if any_run else "⚡ Flash الجميع",
+                                   b"cam_flash_all", style='danger' if any_run else 'success')])
     for s in streams:
         aid = s["account_id"]
         on = cam_state.get((uid, aid), False)
@@ -819,11 +823,7 @@ def cam_menu_buttons(uid, back_data=b"stream_menu"):
                           style='danger' if (uid, aid) in flash_running else 'primary'),
         ])
     if streams:
-        rows.append([
-            Button.inline("📷 فتح / إغلاق الكل", b"cam_toggle_all", style='primary'),
-            Button.inline("⏹ إيقاف الفلاش للكل" if any((uid, s["account_id"]) in flash_running for s in streams) else "⚡ فلاش متكرر للكل",
-                          b"cam_flash_all", style='danger'),
-        ])
+        rows.append([Button.inline("📷 فتح / إغلاق الكل", b"cam_toggle_all", style='primary')])
     rows.append([Button.inline("رجوع", back_data, style='danger')])
     return rows
 
