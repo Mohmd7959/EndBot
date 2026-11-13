@@ -738,9 +738,12 @@ def schedule_private_hangup(uid, aid, cli, call, chat_id, duration, max_wait_to_
 
     auto_leave_tasks[(uid, aid)] = asyncio.create_task(_watch())
 
-# ═════════════ تكرار الكام السريع (فتح / إغلاق الكاميرا أثناء البث) ═════════════
-cam_state = {}   # (uid, aid) -> True = الكام مفتوحة / False = مغلقة
-cam_locks = {}   # قفل لكل حساب عشان الضغطات السريعة ما تتداخل
+# ═════════════ تكرار الكام السريع (فتح / إغلاق / فلاش) ═════════════
+FLASH_SECONDS = 0.25   # مدة ظهور الكام بالفلاش السريع
+
+cam_state = {}      # (uid, aid) -> True = الكام مفتوحة / False = مغلقة
+cam_locks = {}      # قفل لكل حساب عشان الضغطات السريعة ما تتداخل
+_asset_locks = {}   # قفل تجهيز ملف الفلاش
 
 def _cam_lock(uid, aid):
     key = (uid, aid)
@@ -748,63 +751,160 @@ def _cam_lock(uid, aid):
         cam_locks[key] = asyncio.Lock()
     return cam_locks[key]
 
+def flash_asset_path(vid):
+    return vid["file_path"] + ".flash.mp4"
+
+async def ensure_flash_asset(vid):
+    """يجهّز (مرة وحدة) ملف فيه صوت الملف الأصلي + فيديو أسود صغير جداً. يشتغل مع ملفات الصوت والفيديو."""
+    out = flash_asset_path(vid)
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out
+    lock = _asset_locks.setdefault(out, asyncio.Lock())
+    async with lock:
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+        tmp = out + ".tmp.mp4"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=c=black:s=64x64:r=2",
+                "-i", vid["file_path"],
+                "-map", "0:v", "-map", "1:a:0",
+                "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
+                "-pix_fmt", "yuv420p", "-g", "2",
+                "-c:a", "aac", "-b:a", "192k", "-shortest", tmp,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, err = await proc.communicate()
+            if proc.returncode != 0 or not os.path.exists(tmp):
+                print(f"[cam] ❌ فشل تجهيز ملف الفلاش: {(err or b'').decode(errors='ignore')[:300]}")
+                return None
+            os.replace(tmp, out)
+            return out
+        except Exception as ex:
+            print(f"[cam] ❌ فشل تجهيز ملف الفلاش: {type(ex).__name__}: {ex}")
+            return None
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+
+async def prewarm_flash_assets(uid):
+    """يجهّز ملفات الفلاش بالخلفية أول ما يبدأ البث عشان أول ضغطة تكون فورية."""
+    for s in get_all_active_streams_for_user(uid):
+        vid = get_video(uid, s["account_id"])
+        if vid and os.path.exists(vid["file_path"]):
+            try:
+                await ensure_flash_asset(vid)
+            except Exception:
+                pass
+
 def cam_menu_buttons(uid, back_data=b"stream_menu"):
     rows = []
     streams = get_all_active_streams_for_user(uid)
     for s in streams:
         aid = s["account_id"]
-        on = cam_state.get((uid, aid), True)
+        on = cam_state.get((uid, aid), False)
         acc = get_account(uid, aid)
         name = (acc["first_name"] if acc and acc.get("first_name") else str(aid))
-        lbl = f"📷 {name}: {'🟢 مفتوحة (اضغط للإغلاق)' if on else '🔴 مغلقة (اضغط للفتح)'}"
-        rows.append([Button.inline(lbl, f"cam_toggle_{aid}".encode(), style='danger' if on else 'success')])
+        lbl = f"📷 {name}: {'🟢 مفتوحة' if on else '🔴 مغلقة'}"
+        rows.append([
+            Button.inline(lbl, f"cam_toggle_{aid}".encode(), style='danger' if on else 'success'),
+            Button.inline("⚡ فلاش", f"cam_flash_{aid}".encode(), style='primary'),
+        ])
     if len(streams) > 1:
-        rows.append([Button.inline("📷 فتح / إغلاق الكل", b"cam_toggle_all", style='primary')])
+        rows.append([
+            Button.inline("📷 فتح / إغلاق الكل", b"cam_toggle_all", style='primary'),
+            Button.inline("⚡ فلاش للكل", b"cam_flash_all", style='primary'),
+        ])
     rows.append([Button.inline("رجوع", back_data, style='danger')])
     return rows
 
-async def toggle_camera(uid, aid):
-    """يفتح أو يغلق الكام (فيديو البث) لحساب واحد بدون ما ينزل من الاتصال. يرجع (ok, is_on_now, msg)."""
+async def _cam_play(uid, aid, mode, silent_lock=False):
+    """mode: off = بدون كام | full = كام كاملة | flash = كام صغيرة ثم تنغلق. يرجع (ok, msg)."""
     s = get_active_stream(uid, aid)
     if not s:
-        return False, False, "لا يوجد بث شغال"
+        return False, "لا يوجد بث شغال"
     call = get_state(uid)["calls"].get(aid)
     if not call:
-        return False, False, "الحساب غير متصل"
+        return False, "الحساب غير متصل"
     chat_id = s["chat_id"]
     if chat_id == 0:
-        return False, False, "رابط call ما يدعم التبديل"
+        return False, "رابط call ما يدعم التبديل"
     vid = get_video(uid, aid)
     if not vid or not os.path.exists(vid["file_path"]):
-        return False, False, "ملف الفيديو غير موجود"
-    if vid.get("media_type") == "audio":
-        return False, False, "الملف صوت فقط (ما فيه كام)"
+        return False, "ملف الفيديو غير موجود"
+    is_audio = vid.get("media_type") == "audio"
 
-    async with _cam_lock(uid, aid):
-        turn_on = not cam_state.get((uid, aid), True)
-        # نكمل من نفس نقطة الفيديو بدل ما يرجع من الصفر
+    def _offset():
         try:
-            offset = max(0, int((datetime.now() - datetime.fromisoformat(s["started_at"])).total_seconds()))
+            return max(0.0, (datetime.now() - datetime.fromisoformat(s["started_at"])).total_seconds())
         except Exception:
-            offset = 0
+            return 0.0
+
+    async def _play(path, mode_kind):
         kwargs = {"audio_parameters": AudioQuality.STUDIO}
-        if turn_on:
-            kwargs["video_parameters"] = VideoQuality.HD_720p
-        else:
+        if mode_kind == "off":
             kwargs["video_flags"] = MediaStream.Flags.IGNORE
-        last_err = None
-        for use_offset in ((True, False) if offset > 0 else (False,)):
+        elif mode_kind == "flash":
+            kwargs["video_parameters"] = VideoQuality.SD_360p
+        else:
+            kwargs["video_parameters"] = VideoQuality.HD_720p
+        off = int(_offset())
+        last = None
+        for use_off in ((True, False) if off > 0 else (False,)):
             try:
                 kw = dict(kwargs)
-                if use_offset:
-                    kw["ffmpeg_parameters"] = f"-ss {offset}"
-                await call.play(chat_id, MediaStream(vid["file_path"], **kw))
-                cam_state[(uid, aid)] = turn_on
-                return True, turn_on, "تم"
+                if use_off:
+                    kw["ffmpeg_parameters"] = f"-ss {off}"
+                await call.play(chat_id, MediaStream(path, **kw))
+                return None
             except Exception as ex:
-                last_err = ex
-                print(f"[cam] ❌ فشل تبديل الكام لحساب {aid}: {type(ex).__name__}: {ex}")
-        return False, not turn_on, f"{type(last_err).__name__}"
+                last = ex
+                print(f"[cam] ❌ فشل ({mode_kind}) لحساب {aid}: {type(ex).__name__}: {ex}")
+        return last
+
+    async with _cam_lock(uid, aid):
+        if mode == "flash":
+            asset = await ensure_flash_asset(vid)
+            if not asset:
+                return False, "فشل تجهيز ملف الكام"
+            err = await _play(asset, "flash")
+            if err:
+                return False, type(err).__name__
+            await asyncio.sleep(FLASH_SECONDS)
+            err = await _play(vid["file_path"], "off")
+            cam_state[(uid, aid)] = False
+            return (err is None), ("تم" if err is None else type(err).__name__)
+
+        if mode == "full":
+            if is_audio:
+                path = await ensure_flash_asset(vid)
+                if not path:
+                    return False, "فشل تجهيز ملف الكام"
+                err = await _play(path, "flash")
+            else:
+                err = await _play(vid["file_path"], "full")
+            if err:
+                return False, type(err).__name__
+            cam_state[(uid, aid)] = True
+            return True, "تم"
+
+        err = await _play(vid["file_path"], "off")
+        if err:
+            return False, type(err).__name__
+        cam_state[(uid, aid)] = False
+        return True, "تم"
+
+async def toggle_camera(uid, aid):
+    """يبدّل الكام (فتح/إغلاق). يرجع (ok, is_on_now, msg)."""
+    turn_on = not cam_state.get((uid, aid), False)
+    ok, msg = await _cam_play(uid, aid, "full" if turn_on else "off")
+    return ok, (turn_on if ok else not turn_on), msg
+
+async def flash_camera(uid, aid):
+    return await _cam_play(uid, aid, "flash")
 
 async def respond(event, text, buttons=None, **kw):
     try:
@@ -830,6 +930,10 @@ def delete_video_file(uid, aid):
     if vid and vid.get("file_path") and os.path.exists(vid["file_path"]):
         try:
             os.remove(vid["file_path"])
+        except Exception:
+            pass
+        try:
+            os.remove(vid["file_path"] + ".flash.mp4")
         except Exception:
             pass
     remove_video(uid, aid)
@@ -1954,7 +2058,8 @@ async def cb_start_one_norm(e):
     success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
     if success:
         await edit(e, f"✅ تم بدء التشغيل في: {ch['chat_title']} (سينزل تلقائياً فور انتهاء الفيديو)", buttons=back_button())
-        cam_state[(uid, aid)] = True
+        cam_state[(uid, aid)] = not (get_video(uid, aid) or {}).get("media_type") == "audio"
+        asyncio.create_task(prewarm_flash_assets(uid))
         await e.respond("📷 تحكم بالكاميرا أثناء البث:", buttons=cam_menu_buttons(uid))
     else:
         await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
@@ -2016,7 +2121,8 @@ async def cb_start_all_normal(e):
     await edit(e, "⚡ نتائج التشغيل الفوري المتزامن:\n\n" + "\n".join(results), buttons=back_button())
     if any(isinstance(o, tuple) and o[0] for o in outcomes):
         for _a in accs:
-            cam_state[(uid, _a["account_id"])] = True
+            cam_state[(uid, _a["account_id"])] = not (get_video(uid, _a["account_id"]) or {}).get("media_type") == "audio"
+        asyncio.create_task(prewarm_flash_assets(uid))
         await e.respond("📷 تحكم بالكاميرا أثناء البث (لكل الحسابات الشغالة):", buttons=cam_menu_buttons(uid))
 
 @bot.on(events.CallbackQuery(data=b"stop_all_streams"))
@@ -2282,6 +2388,12 @@ async def cb_dev_del_session(e):
     await edit(e, "✅ تم حذف جلسة المطور.", buttons=[[Button.inline("رجوع", b"dev_sessions_menu", style='primary')]])
     await e.answer()
 
+async def _refresh_cam_menu(e, uid):
+    try:
+        await edit(e, "📷 تحكم بالكاميرا أثناء البث:", buttons=cam_menu_buttons(uid))
+    except Exception:
+        pass
+
 @bot.on(events.CallbackQuery(pattern=rb"^cam_toggle_(\d+)$"))
 async def cb_cam_toggle(e):
     uid = e.sender_id
@@ -2291,11 +2403,20 @@ async def cb_cam_toggle(e):
     ok, on, msg = await toggle_camera(uid, aid)
     if not ok:
         return await e.answer(f"❌ {msg}", alert=True)
-    await e.answer("📷 الكام مفتوحة" if on else "📷 الكام مغلقة")
-    try:
-        await edit(e, "📷 تحكم بالكاميرا أثناء البث:", buttons=cam_menu_buttons(uid))
-    except Exception:
-        pass
+    await e.answer("📷 مفتوحة" if on else "📷 مغلقة")
+    asyncio.create_task(_refresh_cam_menu(e, uid))
+
+@bot.on(events.CallbackQuery(pattern=rb"^cam_flash_(\d+)$"))
+async def cb_cam_flash(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    aid = int(e.pattern_match.group(1))
+    ok, msg = await flash_camera(uid, aid)
+    if not ok:
+        return await e.answer(f"❌ {msg}", alert=True)
+    await e.answer("⚡")
+    asyncio.create_task(_refresh_cam_menu(e, uid))
 
 @bot.on(events.CallbackQuery(data=b"cam_toggle_all"))
 async def cb_cam_toggle_all(e):
@@ -2308,10 +2429,20 @@ async def cb_cam_toggle_all(e):
     results = await asyncio.gather(*[toggle_camera(uid, s["account_id"]) for s in streams], return_exceptions=True)
     done = sum(1 for r in results if isinstance(r, tuple) and r[0])
     await e.answer(f"تم تبديل الكام لـ {done} حساب")
-    try:
-        await edit(e, "📷 تحكم بالكاميرا أثناء البث:", buttons=cam_menu_buttons(uid))
-    except Exception:
-        pass
+    asyncio.create_task(_refresh_cam_menu(e, uid))
+
+@bot.on(events.CallbackQuery(data=b"cam_flash_all"))
+async def cb_cam_flash_all(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    streams = get_all_active_streams_for_user(uid)
+    if not streams:
+        return await e.answer("لا يوجد بث شغال حالياً", alert=True)
+    results = await asyncio.gather(*[flash_camera(uid, s["account_id"]) for s in streams], return_exceptions=True)
+    done = sum(1 for r in results if isinstance(r, tuple) and r[0])
+    await e.answer(f"⚡ {done}")
+    asyncio.create_task(_refresh_cam_menu(e, uid))
 
 @bot.on(events.CallbackQuery(data=b"dev_back"))
 async def cb_dev_back(e):
