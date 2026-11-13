@@ -738,40 +738,73 @@ def schedule_private_hangup(uid, aid, cli, call, chat_id, duration, max_wait_to_
 
     auto_leave_tasks[(uid, aid)] = asyncio.create_task(_watch())
 
-# ═════════════ تحكم مستوى الصوت أثناء البث (متل بوت كام) ═════════════
-VOLUME_LEVELS = [0, 50, 100, 150, 200, 300, 400, 600, 800, 1000, 1200, 1500, 2000, 2500, 3000]
+# ═════════════ تكرار الكام السريع (فتح / إغلاق الكاميرا أثناء البث) ═════════════
+cam_state = {}   # (uid, aid) -> True = الكام مفتوحة / False = مغلقة
+cam_locks = {}   # قفل لكل حساب عشان الضغطات السريعة ما تتداخل
 
-def volume_menu_buttons(back_data=b"stream_menu"):
+def _cam_lock(uid, aid):
+    key = (uid, aid)
+    if key not in cam_locks:
+        cam_locks[key] = asyncio.Lock()
+    return cam_locks[key]
+
+def cam_menu_buttons(uid, back_data=b"stream_menu"):
     rows = []
-    row = []
-    for lvl in VOLUME_LEVELS:
-        row.append(Button.inline(f"{lvl}%", f"vol_set_{lvl}".encode(), style='danger' if lvl == 800 else 'primary'))
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([Button.inline("✏️ إدخال مستوى 0-3000", b"vol_manual", style='primary')])
+    streams = get_all_active_streams_for_user(uid)
+    for s in streams:
+        aid = s["account_id"]
+        on = cam_state.get((uid, aid), True)
+        acc = get_account(uid, aid)
+        name = (acc["first_name"] if acc and acc.get("first_name") else str(aid))
+        lbl = f"📷 {name}: {'🟢 مفتوحة (اضغط للإغلاق)' if on else '🔴 مغلقة (اضغط للفتح)'}"
+        rows.append([Button.inline(lbl, f"cam_toggle_{aid}".encode(), style='danger' if on else 'success')])
+    if len(streams) > 1:
+        rows.append([Button.inline("📷 فتح / إغلاق الكل", b"cam_toggle_all", style='primary')])
     rows.append([Button.inline("رجوع", back_data, style='danger')])
     return rows
 
-async def apply_volume_to_user_streams(uid, percent):
-    """يطبّق مستوى الصوت على كل البثوث الشغالة حالياً لهذا المستخدم (كل الحسابات المتصلة)."""
-    streams = get_all_active_streams_for_user(uid)
-    st = get_state(uid)
-    ok, fail = 0, 0
-    for s in streams:
-        call = st["calls"].get(s["account_id"])
-        if not call:
-            fail += 1
-            continue
+async def toggle_camera(uid, aid):
+    """يفتح أو يغلق الكام (فيديو البث) لحساب واحد بدون ما ينزل من الاتصال. يرجع (ok, is_on_now, msg)."""
+    s = get_active_stream(uid, aid)
+    if not s:
+        return False, False, "لا يوجد بث شغال"
+    call = get_state(uid)["calls"].get(aid)
+    if not call:
+        return False, False, "الحساب غير متصل"
+    chat_id = s["chat_id"]
+    if chat_id == 0:
+        return False, False, "رابط call ما يدعم التبديل"
+    vid = get_video(uid, aid)
+    if not vid or not os.path.exists(vid["file_path"]):
+        return False, False, "ملف الفيديو غير موجود"
+    if vid.get("media_type") == "audio":
+        return False, False, "الملف صوت فقط (ما فيه كام)"
+
+    async with _cam_lock(uid, aid):
+        turn_on = not cam_state.get((uid, aid), True)
+        # نكمل من نفس نقطة الفيديو بدل ما يرجع من الصفر
         try:
-            await call.change_volume_call(s["chat_id"], percent)
-            ok += 1
-        except Exception as ex:
-            fail += 1
-            print(f"[volume] ❌ فشل ضبط الصوت لحساب {s['account_id']}: {type(ex).__name__}: {ex}")
-    return ok, fail
+            offset = max(0, int((datetime.now() - datetime.fromisoformat(s["started_at"])).total_seconds()))
+        except Exception:
+            offset = 0
+        kwargs = {"audio_parameters": AudioQuality.STUDIO}
+        if turn_on:
+            kwargs["video_parameters"] = VideoQuality.HD_720p
+        else:
+            kwargs["video_flags"] = MediaStream.Flags.IGNORE
+        last_err = None
+        for use_offset in ((True, False) if offset > 0 else (False,)):
+            try:
+                kw = dict(kwargs)
+                if use_offset:
+                    kw["ffmpeg_parameters"] = f"-ss {offset}"
+                await call.play(chat_id, MediaStream(vid["file_path"], **kw))
+                cam_state[(uid, aid)] = turn_on
+                return True, turn_on, "تم"
+            except Exception as ex:
+                last_err = ex
+                print(f"[cam] ❌ فشل تبديل الكام لحساب {aid}: {type(ex).__name__}: {ex}")
+        return False, not turn_on, f"{type(last_err).__name__}"
 
 async def respond(event, text, buttons=None, **kw):
     try:
@@ -1745,17 +1778,6 @@ async def on_message(e):
         await respond(e, f"✅ تم حفظ جلسة المطور: {me.first_name} (`{me.id}`)", buttons=[[Button.inline("رجوع", b"dev_sessions_menu", style='danger')]], parse_mode="markdown")
         return
 
-    if step == "vol_manual_input":
-        login_pending.pop(uid, None)
-        txt = (e.text or "").strip()
-        if not txt.isdigit() or not (0 <= int(txt) <= 3000):
-            return await respond(e, "رقم غير صالح، أرسل رقم بين 0 و 3000.")
-        percent = int(txt)
-        ok, fail = await apply_volume_to_user_streams(uid, percent)
-        if ok == 0 and fail == 0:
-            return await respond(e, "لا يوجد بث شغال حالياً", buttons=volume_menu_buttons())
-        return await respond(e, f"🔊 تم ضبط مستوى الصوت: {percent}%", buttons=volume_menu_buttons())
-
     if step == "adm_add_admin_id":
         login_pending.pop(e.sender_id, None)
         if not is_dev(e.sender_id):
@@ -1932,7 +1954,8 @@ async def cb_start_one_norm(e):
     success, msg = await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"))
     if success:
         await edit(e, f"✅ تم بدء التشغيل في: {ch['chat_title']} (سينزل تلقائياً فور انتهاء الفيديو)", buttons=back_button())
-        await e.respond("🔊 تحكم بمستوى الصوت أثناء البث:", buttons=volume_menu_buttons())
+        cam_state[(uid, aid)] = True
+        await e.respond("📷 تحكم بالكاميرا أثناء البث:", buttons=cam_menu_buttons(uid))
     else:
         await edit(e, f"❌ فشل البث: {msg}", buttons=back_button())
 
@@ -1992,7 +2015,9 @@ async def cb_start_all_normal(e):
 
     await edit(e, "⚡ نتائج التشغيل الفوري المتزامن:\n\n" + "\n".join(results), buttons=back_button())
     if any(isinstance(o, tuple) and o[0] for o in outcomes):
-        await e.respond("🔊 تحكم بمستوى الصوت أثناء البث (لكل الحسابات الشغالة):", buttons=volume_menu_buttons())
+        for _a in accs:
+            cam_state[(uid, _a["account_id"])] = True
+        await e.respond("📷 تحكم بالكاميرا أثناء البث (لكل الحسابات الشغالة):", buttons=cam_menu_buttons(uid))
 
 @bot.on(events.CallbackQuery(data=b"stop_all_streams"))
 async def cb_stop_all(e):
@@ -2257,30 +2282,36 @@ async def cb_dev_del_session(e):
     await edit(e, "✅ تم حذف جلسة المطور.", buttons=[[Button.inline("رجوع", b"dev_sessions_menu", style='primary')]])
     await e.answer()
 
-@bot.on(events.CallbackQuery(pattern=rb"^vol_set_(\d+)$"))
-async def cb_vol_set(e):
+@bot.on(events.CallbackQuery(pattern=rb"^cam_toggle_(\d+)$"))
+async def cb_cam_toggle(e):
     uid = e.sender_id
     if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
-    percent = int(e.pattern_match.group(1))
-    ok, fail = await apply_volume_to_user_streams(uid, percent)
-    if ok == 0 and fail == 0:
-        await e.answer("لا يوجد بث شغال حالياً", alert=True)
-        return
-    await e.answer(f"تم ضبط مستوى الصوت: {percent}%")
+    aid = int(e.pattern_match.group(1))
+    ok, on, msg = await toggle_camera(uid, aid)
+    if not ok:
+        return await e.answer(f"❌ {msg}", alert=True)
+    await e.answer("📷 الكام مفتوحة" if on else "📷 الكام مغلقة")
     try:
-        await edit(e, f"🔊 تم ضبط مستوى الصوت: {percent}%", buttons=volume_menu_buttons())
+        await edit(e, "📷 تحكم بالكاميرا أثناء البث:", buttons=cam_menu_buttons(uid))
     except Exception:
         pass
 
-@bot.on(events.CallbackQuery(data=b"vol_manual"))
-async def cb_vol_manual(e):
+@bot.on(events.CallbackQuery(data=b"cam_toggle_all"))
+async def cb_cam_toggle_all(e):
     uid = e.sender_id
     if not is_subscriber(uid):
         return await e.answer("غير مصرح", alert=True)
-    login_pending[uid] = {"step": "vol_manual_input"}
-    await edit(e, "أرسل رقم مستوى الصوت (0 - 3000):", buttons=[[Button.inline("رجوع", b"stream_menu", style='danger')]])
-    await e.answer()
+    streams = get_all_active_streams_for_user(uid)
+    if not streams:
+        return await e.answer("لا يوجد بث شغال حالياً", alert=True)
+    results = await asyncio.gather(*[toggle_camera(uid, s["account_id"]) for s in streams], return_exceptions=True)
+    done = sum(1 for r in results if isinstance(r, tuple) and r[0])
+    await e.answer(f"تم تبديل الكام لـ {done} حساب")
+    try:
+        await edit(e, "📷 تحكم بالكاميرا أثناء البث:", buttons=cam_menu_buttons(uid))
+    except Exception:
+        pass
 
 @bot.on(events.CallbackQuery(data=b"dev_back"))
 async def cb_dev_back(e):
