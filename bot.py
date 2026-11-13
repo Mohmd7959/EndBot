@@ -747,6 +747,7 @@ cam_locks = {}      # قفل لكل حساب عشان الضغطات السري�
 _asset_locks = {}   # قفل تجهيز ملف الفلاش
 flash_running = set()   # الحسابات اللي فلاشها شغال حالياً
 flash_stop = set()      # طلبات إيقاف التكرار
+flash_pending = set()   # مستخدمين جاري انضمام حساباتهم قبل بدء الفلاش
 
 def _cam_lock(uid, aid):
     key = (uid, aid)
@@ -1324,6 +1325,8 @@ async def cb_stream_menu(e):
     
     btns.append([Button.inline("🧹 مسح الفيديوهات والروابط", b"clear_media", style='danger')])
     btns.append([Button.inline("⚡ تشغيل فوري للجميع (بالصوت الأصلي)", b"start_all_normal", style='success')])
+    _any_flash = any((uid, _i) in flash_running for _i in active_ids)
+    btns.append([Button.inline("⏹ إيقاف Flash" if _any_flash else "⚡ Flash الجميع", b"menu_flash_all", style='danger' if _any_flash else 'primary')])
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
     btns.append([Button.inline("رجوع", b"back_main", style='danger')])
     
@@ -2433,10 +2436,11 @@ async def cb_cam_toggle(e):
     await e.answer("📷 مفتوحة" if on else "📷 مغلقة")
     asyncio.create_task(_refresh_cam_menu(e, uid))
 
-async def _run_flash(e, uid, aids):
+async def _run_flash(e, uid, aids, refresh=None):
+    refresh = refresh or _refresh_cam_menu
     job = asyncio.gather(*[flash_camera(uid, a) for a in aids], return_exceptions=True)
     await asyncio.sleep(0.4)
-    await _refresh_cam_menu(e, uid)   # يظهر زر الإيقاف
+    await refresh(e, uid)   # يظهر زر الإيقاف
     results = await job
     fails = [r[1] for r in results if isinstance(r, tuple) and not r[0]]
     fails += [type(r).__name__ for r in results if not isinstance(r, tuple)]
@@ -2445,7 +2449,7 @@ async def _run_flash(e, uid, aids):
             await e.respond(f"❌ فشل الفلاش: {fails[0]}")
         except Exception:
             pass
-    await _refresh_cam_menu(e, uid)
+    await refresh(e, uid)
 
 @bot.on(events.CallbackQuery(pattern=rb"^cam_flash_(\d+)$"))
 async def cb_cam_flash(e):
@@ -2488,6 +2492,77 @@ async def cb_cam_flash_all(e):
         return
     await e.answer(f"⚡ {len(aids)}")
     asyncio.create_task(_run_flash(e, uid, aids))
+
+async def _refresh_stream_menu(e, uid):
+    try:
+        await cb_stream_menu(e)
+    except Exception:
+        pass
+
+async def _flash_all_pipeline(e, uid, ch, accs):
+    """ينضم بالحسابات اللي مو شغالة (إن وجدت) وأول ما ينضمون يبدأ الفتح والإغلاق فوراً."""
+    flash_pending.add(uid)
+    ok_aids = []
+    try:
+        active = {s["account_id"] for s in get_all_active_streams_for_user(uid)}
+        ok_aids = [a["account_id"] for a in accs if a["account_id"] in active]
+        missing = [a for a in accs if a["account_id"] not in active]
+        if missing:
+            try:
+                await edit(e, "⚡ جاري انضمام الحسابات... أول ما ينضمون يبدأ الفلاش مباشرة",
+                           buttons=[[Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')]])
+            except Exception:
+                pass
+            gate = _SyncGate(len(missing))
+
+            async def _join(acc):
+                aid = acc["account_id"]
+                vid = get_video(uid, aid)
+                if vid and os.path.exists(vid["file_path"]):
+                    asyncio.create_task(ensure_flash_asset(vid))   # يتجهز أثناء الانضمام
+                return await start_stream_for_account(uid, aid, ch["chat_id"], ch["chat_title"], ch.get("invite_link"), sync_gate=gate)
+
+            outcomes = await asyncio.gather(*[_join(a) for a in missing], return_exceptions=True)
+            fails = []
+            for acc, o in zip(missing, outcomes):
+                name = acc["first_name"] if acc["first_name"] else mask_phone(acc["phone"])
+                if isinstance(o, tuple) and o[0]:
+                    ok_aids.append(acc["account_id"])
+                else:
+                    fails.append(f"{name}: {o[1] if isinstance(o, tuple) else 'خطأ غير متوقع'}")
+            if fails:
+                try:
+                    await e.respond("❌ حسابات فشل انضمامها:\n" + "\n".join(fails))
+                except Exception:
+                    pass
+    finally:
+        flash_pending.discard(uid)
+    if not ok_aids:
+        return await _refresh_stream_menu(e, uid)
+    await _run_flash(e, uid, ok_aids, _refresh_stream_menu)
+
+@bot.on(events.CallbackQuery(data=b"menu_flash_all"))
+async def cb_menu_flash_all(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    streams = get_all_active_streams_for_user(uid)
+    aids = [s["account_id"] for s in streams]
+    running = [a for a in aids if (uid, a) in flash_running]
+    if running:
+        await e.answer("⏹ جاري الإيقاف")
+        asyncio.create_task(_run_flash(e, uid, running, _refresh_stream_menu))
+        return
+    if uid in flash_pending:
+        return await e.answer("الحسابات جاري انضمامها، انتظر لحظة...", alert=True)
+    accs = get_accounts(uid)
+    if not accs:
+        return await e.answer("لا توجد حسابات!", alert=True)
+    ch = get_chat(uid)
+    if len(aids) < len(accs) and not ch:
+        return await e.answer("يجب تعيين رابط الاتصال أولاً!", alert=True)
+    await e.answer(f"⚡ {len(accs)}")
+    asyncio.create_task(_flash_all_pipeline(e, uid, ch, accs))
 
 @bot.on(events.CallbackQuery(data=b"dev_back"))
 async def cb_dev_back(e):
