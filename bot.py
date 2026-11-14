@@ -15,6 +15,7 @@ from telethon.errors import MessageNotModifiedError, UserAlreadyParticipantError
 from pytgcalls import PyTgCalls, idle
 from pytgcalls.types import MediaStream, AudioQuality, VideoQuality
 from config import *
+import glob, random
 
 bot = TelegramClient("bot_session", API_ID, API_HASH)
 user_state = {}
@@ -739,9 +740,16 @@ def schedule_private_hangup(uid, aid, cli, call, chat_id, duration, max_wait_to_
     auto_leave_tasks[(uid, aid)] = asyncio.create_task(_watch())
 
 # ═════════════ تكرار الكام السريع (فتح / إغلاق / فلاش) ═════════════
-FLASH_ON_SECONDS = 0.3    # مدة ظهور الكام بكل لمحة
-FLASH_OFF_SECONDS = 0.1  # مدة الإغلاق بين اللمحات
+FLASH_ON_SECONDS = 0.1    # متوسط مدة ظهور الكام بكل لمحة (مع عشوائية حول هذا الرقم)
+FLASH_OFF_SECONDS = 0.1   # متوسط مدة الإغلاق بين اللمحات (مع عشوائية حول هذا الرقم)
+FLASH_IMG_DIR = os.path.join(VIDEOS_DIR, "flash_images")
 RESTART_LATENCY = 0.35     # وقت إعادة تشغيل البث التقريبي: نقدّم الصوت بمقداره عشان ما يرجع/يقفز الصوت
+FLASH_STAGGER = 0.15       # متوسط الفاصل بين بداية فلاش حساب والي بعده (عشوائي حتى لا يكون التسلسل ثابت)
+FLASH_JITTER = 0.6         # نسبة العشوائية حول FLASH_ON/OFF_SECONDS (0.6 = من 40% إلى 160% من القيمة)
+
+def _jittered(base, jitter=FLASH_JITTER):
+    return max(0.02, base * random.uniform(1 - jitter, 1 + jitter))
+
 
 cam_state = {}      # (uid, aid) -> True = الكام مفتوحة / False = مغلقة
 cam_locks = {}      # قفل لكل حساب عشان الضغطات السريعة ما تتداخل
@@ -757,8 +765,43 @@ def _cam_lock(uid, aid):
         cam_locks[key] = asyncio.Lock()
     return cam_locks[key]
 
+def flash_image_path(uid):
+    p = os.path.join(FLASH_IMG_DIR, f"{uid}.jpg")
+    return p if os.path.exists(p) and os.path.getsize(p) > 0 else None
+
 def flash_asset_path(vid):
+    img = flash_image_path(vid.get("user_id"))
+    if img:
+        return vid["file_path"] + f".flash_{int(os.path.getmtime(img))}.mp4"
     return vid["file_path"] + ".flash.mp4"
+
+def clear_flash_assets(uid):
+    """يمسح ملفات الفلاش المجهزة (تتجهز من جديد بالصورة الجديدة أو بالأسود)."""
+    for a in get_accounts(uid):
+        vid = get_video(uid, a["account_id"])
+        if not vid:
+            continue
+        for f in glob.glob(glob.escape(vid["file_path"]) + ".flash*.mp4"):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+
+async def prewarm_user_assets(uid):
+    for a in get_accounts(uid):
+        vid = get_video(uid, a["account_id"])
+        if vid and os.path.exists(vid["file_path"]):
+            try:
+                await ensure_flash_asset(vid)
+            except Exception:
+                pass
+
+def flash_image_rows(uid, origin):
+    has = flash_image_path(uid) is not None
+    rows = [[Button.inline("🖼 إرفاق صورة للفلاش" + (" (مرفقة ✅)" if has else ""), f"flash_img_set_{origin}".encode(), style='primary')]]
+    if has:
+        rows.append([Button.inline("🗑 مسح الصورة (رجوع للأسود)", f"flash_img_del_{origin}".encode(), style='danger')])
+    return rows
 
 async def ensure_flash_asset(vid):
     """يجهّز (مرة وحدة) ملف فيه صوت الملف الأصلي + فيديو أسود صغير جداً. يشتغل مع ملفات الصوت والفيديو."""
@@ -771,14 +814,21 @@ async def ensure_flash_asset(vid):
             return out
         tmp = out + ".tmp.mp4"
         try:
+            img = flash_image_path(vid.get("user_id"))
+            if img:
+                vin = ["-loop", "1", "-framerate", "2", "-i", img]
+                vf = ["-vf", "scale=640:360:force_original_aspect_ratio=decrease,pad=640:360:(ow-iw)/2:(oh-ih)/2:black,format=yuv420p"]
+            else:
+                vin = ["-f", "lavfi", "-i", "color=c=black:s=64x64:r=2"]
+                vf = []
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "color=c=black:s=64x64:r=2",
+                *vin,
                 "-i", vid["file_path"],
-                "-map", "0:v", "-map", "1:a:0",
+                "-map", "0:v", "-map", "1:a:0", *vf,
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "stillimage",
                 "-pix_fmt", "yuv420p", "-g", "2",
-                "-c:a", "aac", "-b:a", "192k", "-shortest", tmp,
+                "-c:a", "aac", "-b:a", "192k", "-shortest", "-f", "mp4", tmp,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
             _, err = await proc.communicate()
             if proc.returncode != 0 or not os.path.exists(tmp):
@@ -827,6 +877,7 @@ def cam_menu_buttons(uid, back_data=b"stream_menu"):
         ])
     if streams:
         rows.append([Button.inline("📷 فتح / إغلاق الكل", b"cam_toggle_all", style='primary')])
+    rows.extend(flash_image_rows(uid, "c"))
     rows.append([Button.inline("رجوع", back_data, style='danger')])
     return rows
 
@@ -885,21 +936,37 @@ async def _cam_play(uid, aid, mode, silent_lock=False, already_on=False):
             flash_stop.discard(key)
             err = None
             skip_on = already_on   # الحساب توه صاعد بكام الفلاش، فنبدأ بالإغلاق بدون إعادة تشغيل
+
+            async def set_cams(open_):
+                return await _play(asset, "flash" if open_ else "off")
+
+            fails = 0
             while True:  # تكرار تلقائي لين تضغط إيقاف أو ينتهي البث
                 if key in flash_stop or not get_active_stream(uid, aid):
                     break
                 if not skip_on:
-                    err = await _play(asset, "flash")
+                    err = await set_cams(True)
                     if err:
-                        break
+                        fails += 1
+                        print(f"[cam] ⚠️ فتح فشل ({fails}) لحساب {aid}: {type(err).__name__}: {err}")
+                        if fails >= 5:
+                            break
+                        await asyncio.sleep(0.3)
+                        continue
                 skip_on = False
-                await asyncio.sleep(FLASH_ON_SECONDS)
-                err = await _play(asset, "off")   # نفس الملف الخفيف: إعادة التشغيل أسرع والصوت أقل تقطيعاً
+                await asyncio.sleep(_jittered(FLASH_ON_SECONDS))
+                err = await set_cams(False)
                 if err:
-                    break
+                    fails += 1
+                    print(f"[cam] ⚠️ إغلاق فشل ({fails}) لحساب {aid}: {type(err).__name__}: {err}")
+                    if fails >= 5:
+                        break
+                    await asyncio.sleep(0.3)
+                    continue
+                fails = 0
                 if key in flash_stop:
                     break
-                await asyncio.sleep(FLASH_OFF_SECONDS)
+                await asyncio.sleep(_jittered(FLASH_OFF_SECONDS))
             flash_stop.discard(key)
             cam_state[key] = False
             return (err is None), ("تم" if err is None else type(err).__name__)
@@ -938,8 +1005,8 @@ def _pend_done(uid):
         flash_pending_n[uid] = n
 
 async def flash_join_account(uid, aid, ch):
-    """انضمام سريع ومستقل للفلاش: بدون بوابة تزامن وبدون انتظار باقي الحسابات.
-    يدخل الاتصال مباشرة بفيديو الفلاش الصغير (ما يشغّل الفيديو الأصلي أولاً)."""
+    """صعود مستقل للفلاش: ينضم ويشغّل الفيديو الأصلي مباشرة (نفس طريقة التشغيل العادي المضمونة)،
+    بدون بوابة تزامن ولا انتظار باقي الحسابات. ملف الفلاش يتجهز أثناء الانضمام."""
     chat_id = ch["chat_id"]
     title = ch["chat_title"]
     saved_link = ch.get("invite_link")
@@ -994,25 +1061,39 @@ async def flash_join_account(uid, aid, ch):
             return False, f"تعذر الانضمام للمجموعة: {type(join_err).__name__}"
         return False, "الحساب ليس عضواً في المجموعة"
 
-    asset = await asset_task
-    if not asset:
-        return False, "فشل تجهيز ملف الكام"
+    is_audio = vid.get("media_type") == "audio"
+    stream_kwargs = {"audio_parameters": AudioQuality.STUDIO}
+    if is_audio:
+        stream_kwargs["video_flags"] = MediaStream.Flags.IGNORE
+    else:
+        stream_kwargs["video_parameters"] = VideoQuality.HD_720p
+    stream_media = MediaStream(vid["file_path"], **stream_kwargs)
 
     last_err = None
     for attempt in range(2):
         try:
-            await call.play(chat_id, MediaStream(asset, audio_parameters=AudioQuality.STUDIO,
-                                                 video_parameters=VideoQuality.SD_360p))
+            await call.play(chat_id, stream_media)
             set_active_stream(uid, aid, chat_id, title, vid["id"])
             schedule_auto_leave(uid, aid, call, chat_id, get_video_duration(vid["file_path"]))
-            cam_state[(uid, aid)] = True
-            return True, "تم"
+            cam_state[(uid, aid)] = not is_audio
+            last_err = None
+            break
         except Exception as ex:
             last_err = ex
             print(f"[flash_join] ❌ محاولة {attempt + 1} فشلت لحساب {aid}: {type(ex).__name__}: {ex}")
             if attempt == 0:
                 await asyncio.sleep(0.5)
-    return False, f"خطأ الانضمام: {type(last_err).__name__}"
+    if last_err is not None:
+        asset_task.cancel()
+        return False, f"خطأ الانضمام: {type(last_err).__name__}"
+
+    try:
+        asset = await asset_task
+    except Exception:
+        asset = None
+    if not asset:
+        return False, "فشل تجهيز ملف الكام"
+    return True, "تم"
 
 async def hard_stop_account(uid, aid, call, chat_id):
     """ينزّل الحساب نهائياً حتى لو الفلاش/الكام شغالين، وما يخليه يرجع للاتصال."""
@@ -1092,10 +1173,11 @@ def delete_video_file(uid, aid):
             os.remove(vid["file_path"])
         except Exception:
             pass
-        try:
-            os.remove(vid["file_path"] + ".flash.mp4")
-        except Exception:
-            pass
+        for _f in glob.glob(glob.escape(vid["file_path"]) + ".flash*.mp4"):
+            try:
+                os.remove(_f)
+            except Exception:
+                pass
     remove_video(uid, aid)
 
 def get_video_duration(file_path):
@@ -1459,6 +1541,7 @@ async def cb_stream_menu(e):
     btns.append([Button.inline("⚡ تشغيل فوري للجميع (بالصوت الأصلي)", b"start_all_normal", style='success')])
     _any_flash = any((uid, _i) in flash_running for _i in active_ids)
     btns.append([Button.inline("⏹ إيقاف Flash" if _any_flash else "⚡ Flash الجميع", b"menu_flash_all", style='danger' if _any_flash else 'primary')])
+    btns.extend(flash_image_rows(uid, "m"))
     btns.append([Button.inline("🛑 إيقاف كل الحسابات معاً", b"stop_all_streams", style='danger')])
     btns.append([Button.inline("رجوع", b"back_main", style='danger')])
     
@@ -1667,6 +1750,38 @@ async def on_message(e):
     if not lp:
         return
     step = lp.get("step")
+
+    if step == "flash_image":
+        is_img = bool(e.photo) or bool(e.document and (getattr(e.document, "mime_type", "") or "").startswith("image/"))
+        if not is_img:
+            return await respond(e, "ارسل صورة صالحة (أو اضغط رجوع)")
+        os.makedirs(FLASH_IMG_DIR, exist_ok=True)
+        tmp_in = os.path.join(FLASH_IMG_DIR, f"tmp_{uid}.bin")
+        out = os.path.join(FLASH_IMG_DIR, f"{uid}.jpg")
+        tmp_out = os.path.join(FLASH_IMG_DIR, f"tmp_{uid}.jpg")
+        try:
+            await e.download_media(file=tmp_in)
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-loglevel", "error", "-i", tmp_in, "-frames:v", "1", "-q:v", "2", "-f", "image2", tmp_out,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, ferr = await proc.communicate()
+            if proc.returncode != 0 or not os.path.exists(tmp_out):
+                raise RuntimeError((ferr or b"").decode(errors="ignore")[:200] or "ffmpeg")
+            os.replace(tmp_out, out)
+        except Exception as ex:
+            return await respond(e, f"❌ فشل حفظ الصورة: {type(ex).__name__}")
+        finally:
+            for _t in (tmp_in, tmp_out):
+                if os.path.exists(_t):
+                    try:
+                        os.remove(_t)
+                    except Exception:
+                        pass
+        login_pending.pop(uid, None)
+        clear_flash_assets(uid)
+        asyncio.create_task(prewarm_user_assets(uid))
+        return await e.respond("✅ تم حفظ الصورة، الفلاش يفتح بها بدل الصورة السوداء.",
+                               buttons=[[Button.inline("رجوع للتحكم", b"stream_menu", style='danger')]])
 
     if step == "phone":
         phone = (e.text or "").strip()
@@ -2621,8 +2736,8 @@ async def _refresh_stream_menu(e, uid):
     except Exception:
         pass
 
-async def _flash_join_and_run(e, uid, acc, ch):
-    """حساب واحد: ينضم ويبدأ الفلاش فوراً أول ما يصعد، بدون انتظار باقي الحسابات."""
+async def _flash_join_and_run(e, uid, acc, ch, idx):
+    """حساب واحد: ينضم ثم يبدأ فلاشه فوراً تقريباً (فارق بسيط حسب ترتيبه) بدون انتظار باقي الحسابات."""
     aid = acc["account_id"]
     name = acc["first_name"] if acc["first_name"] else mask_phone(acc["phone"])
     try:
@@ -2637,15 +2752,28 @@ async def _flash_join_and_run(e, uid, acc, ch):
         except Exception:
             pass
         return
-    if uid in stop_requested:   # ضغط إيقاف أثناء الانضمام
+    if uid in stop_requested:
         s_ = get_active_stream(uid, aid)
         await hard_stop_account(uid, aid, get_state(uid)["calls"].get(aid), s_["chat_id"] if s_ else ch["chat_id"])
         return
     asyncio.create_task(_refresh_stream_menu(e, uid))
-    ok2, msg2 = await flash_camera(uid, aid, already_on=True)   # يبدأ بإغلاق ثم فتح... تكرار
+    await asyncio.sleep(_jittered(idx * FLASH_STAGGER + 0.05, 0.5) if idx else random.uniform(0.02, 0.15))   # فارق بسيط وعشوائي، بدون انتظار اكتمال العدد
+    ok2, msg2 = await flash_camera(uid, aid)
     if not ok2:
         try:
             await e.respond(f"❌ {name}: فشل الفلاش ({msg2})")
+        except Exception:
+            pass
+    await _refresh_stream_menu(e, uid)
+
+async def _flash_live_start(e, uid, aid, idx):
+    await asyncio.sleep(_jittered(idx * FLASH_STAGGER + 0.05, 0.5) if idx else random.uniform(0.02, 0.15))
+    if uid in stop_requested or not get_active_stream(uid, aid):
+        return
+    ok, msg = await flash_camera(uid, aid)
+    if not ok:
+        try:
+            await e.respond(f"❌ {aid}: فشل الفلاش ({msg})")
         except Exception:
             pass
     await _refresh_stream_menu(e, uid)
@@ -2655,18 +2783,16 @@ async def _flash_all_pipeline(e, uid, ch, accs):
     active = {s["account_id"] for s in get_all_active_streams_for_user(uid)}
     live = [a["account_id"] for a in accs if a["account_id"] in active]
     missing = [a for a in accs if a["account_id"] not in active]
-    tasks = []
-    if live:
-        tasks.append(_run_flash(e, uid, live, _refresh_stream_menu))
+    tasks = [_flash_live_start(e, uid, aid, i) for i, aid in enumerate(live)]
     if missing:
         _pend_add(uid, len(missing))
         try:
-            await edit(e, "⚡ جاري الانضمام... كل حساب يبدأ فلاش أول ما يصعد",
+            await edit(e, "⚡ جاري الانضمام... كل حساب يبدأ فلاش فور صعوده",
                        buttons=[[Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')]])
         except Exception:
             pass
-        for acc in missing:
-            tasks.append(_flash_join_and_run(e, uid, acc, ch))
+        for i, acc in enumerate(missing):
+            tasks.append(_flash_join_and_run(e, uid, acc, ch, len(live) + i))
     try:
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
@@ -2694,6 +2820,47 @@ async def cb_menu_flash_all(e):
         return await e.answer("يجب تعيين رابط الاتصال أولاً!", alert=True)
     await e.answer(f"⚡ {len(accs)}")
     asyncio.create_task(_flash_all_pipeline(e, uid, ch, accs))
+
+@bot.on(events.CallbackQuery(pattern=rb"^flash_img_set_(m|c)$"))
+async def cb_flash_img_set(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    back = b"stream_menu"
+    login_pending[uid] = {"step": "flash_image"}
+    await edit(e, "🖼 ارسل الصورة اللي تبيها تظهر بدل الصورة السوداء عند فتح الكام بالفلاش:",
+               buttons=[[Button.inline("رجوع", b"flash_img_cancel", style='danger')]])
+
+@bot.on(events.CallbackQuery(data=b"flash_img_cancel"))
+async def cb_flash_img_cancel(e):
+    uid = e.sender_id
+    lp = login_pending.get(uid)
+    if lp and lp.get("step") == "flash_image":
+        login_pending.pop(uid, None)
+    try:
+        await cb_stream_menu(e)
+    except Exception:
+        pass
+
+@bot.on(events.CallbackQuery(pattern=rb"^flash_img_del_(m|c)$"))
+async def cb_flash_img_del(e):
+    uid = e.sender_id
+    if not is_subscriber(uid):
+        return await e.answer("غير مصرح", alert=True)
+    origin = e.pattern_match.group(1).decode()
+    img = flash_image_path(uid)
+    if img:
+        try:
+            os.remove(img)
+        except Exception:
+            pass
+    clear_flash_assets(uid)
+    asyncio.create_task(prewarm_user_assets(uid))
+    await e.answer("🗑 تم المسح، رجع الفلاش للصورة السوداء")
+    if origin == "c":
+        await _refresh_cam_menu(e, uid)
+    else:
+        await _refresh_stream_menu(e, uid)
 
 @bot.on(events.CallbackQuery(data=b"dev_back"))
 async def cb_dev_back(e):
