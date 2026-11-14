@@ -998,9 +998,62 @@ def _pend_done(uid):
     else:
         flash_pending_n[uid] = n
 
+_silence_lock = asyncio.Lock()
+
+async def ensure_silence_file():
+    """ملف صمت قصير: الحسابات تصعد فيه بدون صوت وبدون كام لين يكتمل العدد."""
+    out = os.path.join(VIDEOS_DIR, "_silence.mp3")
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out
+    async with _silence_lock:
+        if os.path.exists(out) and os.path.getsize(out) > 0:
+            return out
+        tmp = out + ".tmp.mp3"
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                "-t", "300", "-c:a", "libmp3lame", "-b:a", "32k", "-f", "mp3", tmp,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _, err = await proc.communicate()
+            if proc.returncode != 0 or not os.path.exists(tmp):
+                print(f"[flash_join] ❌ فشل تجهيز ملف الصمت: {(err or b'').decode(errors='ignore')[:200]}")
+                return None
+            os.replace(tmp, out)
+            return out
+        except Exception as ex:
+            print(f"[flash_join] ❌ فشل تجهيز ملف الصمت: {type(ex).__name__}: {ex}")
+            return None
+        finally:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+
+class _FlashGate:
+    """بوابة: كل الحسابات تنتظر لين يكتمل العدد، وبعدها يبدأ الصوت والفلاش مع بعض."""
+    def __init__(self, n):
+        self.n = n
+        self.count = 0
+        self.ev = asyncio.Event()
+        if n <= 0:
+            self.ev.set()
+
+    def arrive(self):
+        self.count += 1
+        if self.count >= self.n:
+            self.ev.set()
+
+    async def wait(self, timeout=90):
+        try:
+            await asyncio.wait_for(self.ev.wait(), timeout)
+        except asyncio.TimeoutError:
+            pass
+
 async def flash_join_account(uid, aid, ch):
-    """انضمام سريع ومستقل للفلاش: بدون بوابة تزامن وبدون انتظار باقي الحسابات.
-    يدخل الاتصال مباشرة بفيديو الفلاش الصغير (ما يشغّل الفيديو الأصلي أولاً)."""
+    """صعود صامت للفلاش: يدخل الاتصال بدون صوت وبدون كام (مو بالملف الأصلي)، وملف الفلاش يتجهز أثناء الصعود.
+    مستقل عن دالة التشغيل العادي وما فيه بوابة تزامن هنا (البوابة بعد الصعود)."""
     chat_id = ch["chat_id"]
     title = ch["chat_title"]
     saved_link = ch.get("invite_link")
@@ -1055,29 +1108,37 @@ async def flash_join_account(uid, aid, ch):
             return False, f"تعذر الانضمام للمجموعة: {type(join_err).__name__}"
         return False, "الحساب ليس عضواً في المجموعة"
 
-    # نفس طريقة الصعود المضمونة بالتشغيل العادي (الملف الأصلي بنفس الإعدادات)، بس بدون بوابة تزامن وبدون انتظار
-    is_audio = vid.get("media_type") == "audio"
-    stream_kwargs = {"audio_parameters": AudioQuality.STUDIO}
-    if is_audio:
-        stream_kwargs["video_flags"] = MediaStream.Flags.IGNORE
-    else:
-        stream_kwargs["video_parameters"] = VideoQuality.HD_720p
-    stream_media = MediaStream(vid["file_path"], **stream_kwargs)
+    silence = await ensure_silence_file()
+    if not silence:
+        asset_task.cancel()
+        return False, "فشل تجهيز ملف الصمت"
 
+    quiet = MediaStream(silence, audio_parameters=AudioQuality.STUDIO, video_flags=MediaStream.Flags.IGNORE)
     last_err = None
     for attempt in range(2):
         try:
-            await call.play(chat_id, stream_media)
-            set_active_stream(uid, aid, chat_id, title, vid["id"])
-            schedule_auto_leave(uid, aid, call, chat_id, get_video_duration(vid["file_path"]))
-            cam_state[(uid, aid)] = not is_audio
-            return True, "تم"
+            await call.play(chat_id, quiet)
+            set_active_stream(uid, aid, chat_id, title, vid["id"])   # عشان الإيقاف يلقاه
+            cam_state[(uid, aid)] = False
+            last_err = None
+            break
         except Exception as ex:
             last_err = ex
             print(f"[flash_join] ❌ محاولة {attempt + 1} فشلت لحساب {aid}: {type(ex).__name__}: {ex}")
             if attempt == 0:
                 await asyncio.sleep(0.5)
-    return False, f"خطأ الانضمام: {type(last_err).__name__}"
+    if last_err is not None:
+        asset_task.cancel()
+        return False, f"خطأ الانضمام: {type(last_err).__name__}"
+
+    try:
+        asset = await asset_task
+    except Exception:
+        asset = None
+    if not asset:
+        await hard_stop_account(uid, aid, call, chat_id)
+        return False, "فشل تجهيز ملف الكام"
+    return True, "تم"
 
 async def hard_stop_account(uid, aid, call, chat_id):
     """ينزّل الحساب نهائياً حتى لو الفلاش/الكام شغالين، وما يخليه يرجع للاتصال."""
@@ -2720,8 +2781,8 @@ async def _refresh_stream_menu(e, uid):
     except Exception:
         pass
 
-async def _flash_join_and_run(e, uid, acc, ch):
-    """حساب واحد: ينضم ويبدأ الفلاش فوراً أول ما يصعد، بدون انتظار باقي الحسابات."""
+async def _flash_join_and_run(e, uid, acc, ch, gate):
+    """حساب واحد: يصعد صامت، ينتظر اكتمال العدد، وبعدها يبدأ الصوت والفلاش مع باقي الحسابات."""
     aid = acc["account_id"]
     name = acc["first_name"] if acc["first_name"] else mask_phone(acc["phone"])
     try:
@@ -2730,18 +2791,27 @@ async def _flash_join_and_run(e, uid, acc, ch):
         ok, msg = False, type(ex).__name__
     finally:
         _pend_done(uid)
+        gate.arrive()
     if not ok:
         try:
             await e.respond(f"❌ {name}: {msg}")
         except Exception:
             pass
         return
-    if uid in stop_requested:   # ضغط إيقاف أثناء الانضمام
-        s_ = get_active_stream(uid, aid)
-        await hard_stop_account(uid, aid, get_state(uid)["calls"].get(aid), s_["chat_id"] if s_ else ch["chat_id"])
+    await gate.wait()   # ننتظر لين يكتمل العدد
+    call = get_state(uid)["calls"].get(aid)
+    if uid in stop_requested or not get_active_stream(uid, aid):
+        if get_active_stream(uid, aid):
+            await hard_stop_account(uid, aid, call, ch["chat_id"])
         return
+    vid = get_video(uid, aid)
+    if not vid or not call:
+        return
+    # الصوت يبدأ من الصفر مع بداية الفلاش + جدولة النزول التلقائي حسب مدة الملف
+    set_active_stream(uid, aid, ch["chat_id"], ch["chat_title"], vid["id"])
+    schedule_auto_leave(uid, aid, call, ch["chat_id"], get_video_duration(vid["file_path"]))
     asyncio.create_task(_refresh_stream_menu(e, uid))
-    ok2, msg2 = await flash_camera(uid, aid)   # أول ما يصعد: فتح/إغلاق متكرر مباشرة
+    ok2, msg2 = await flash_camera(uid, aid)   # يشتغل الصوت + فتح/إغلاق الكام بالصورة
     if not ok2:
         try:
             await e.respond(f"❌ {name}: فشل الفلاش ({msg2})")
@@ -2749,23 +2819,30 @@ async def _flash_join_and_run(e, uid, acc, ch):
             pass
     await _refresh_stream_menu(e, uid)
 
+async def _live_after_gate(e, uid, aids, gate):
+    await gate.wait()
+    if uid in stop_requested:
+        return
+    await _run_flash(e, uid, aids, _refresh_stream_menu)
+
 async def _flash_all_pipeline(e, uid, ch, accs):
     stop_requested.discard(uid)
     active = {s["account_id"] for s in get_all_active_streams_for_user(uid)}
     live = [a["account_id"] for a in accs if a["account_id"] in active]
     missing = [a for a in accs if a["account_id"] not in active]
+    gate = _FlashGate(len(missing))
     tasks = []
     if live:
-        tasks.append(_run_flash(e, uid, live, _refresh_stream_menu))
+        tasks.append(_live_after_gate(e, uid, live, gate))
     if missing:
         _pend_add(uid, len(missing))
         try:
-            await edit(e, "⚡ جاري الانضمام... كل حساب يبدأ فلاش أول ما يصعد",
+            await edit(e, "⚡ جاري صعود الحسابات بدون صوت... أول ما يكتمل العدد يبدأ الصوت والفلاش مع بعض",
                        buttons=[[Button.inline("🛑 إيقاف ونزول الكل فوراً", b"stop_all_streams", style='danger')]])
         except Exception:
             pass
         for acc in missing:
-            tasks.append(_flash_join_and_run(e, uid, acc, ch))
+            tasks.append(_flash_join_and_run(e, uid, acc, ch, gate))
     try:
         await asyncio.gather(*tasks, return_exceptions=True)
     finally:
