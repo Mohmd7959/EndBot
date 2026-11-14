@@ -742,7 +742,6 @@ def schedule_private_hangup(uid, aid, cli, call, chat_id, duration, max_wait_to_
 # ═════════════ تكرار الكام السريع (فتح / إغلاق / فلاش) ═════════════
 FLASH_ON_SECONDS = 0.2    # مدة ظهور الكام بكل لمحة
 FLASH_OFF_SECONDS = 0.2   # مدة الإغلاق بين اللمحات
-FLASH_DOUBLE = True      # الفتح المزدوج (كام + شاشة) داخل الفلاش فقط
 FLASH_IMG_DIR = os.path.join(VIDEOS_DIR, "flash_images")
 RESTART_LATENCY = 0.35     # وقت إعادة تشغيل البث التقريبي: نقدّم الصوت بمقداره عشان ما يرجع/يقفز الصوت
 
@@ -790,50 +789,6 @@ async def prewarm_user_assets(uid):
                 await ensure_flash_asset(vid)
             except Exception:
                 pass
-
-def _flash_media(path, close=False, **kwargs):
-    """دالة وحيدة للكاميرتين (العادية + المزدوجة):
-    close=False -> تفتح الكام + الكام الثانية (شاشة) معاً بنفس المسار
-    close=True  -> تغلق الاثنتين معاً بنفس المسار"""
-    ms = MediaStream(path, **kwargs)
-    if not close and not FLASH_DOUBLE:
-        return ms
-
-    def _apply():
-        if close:
-            done = False
-            for n in ("camera", "screen"):
-                if hasattr(ms, n):
-                    setattr(ms, n, None)
-                    done = True
-            return done
-        cam = getattr(ms, "camera", None)
-        if cam is not None and hasattr(ms, "screen"):
-            ms.screen = copy.copy(cam)
-            return True
-        return False
-
-    try:
-        applied = _apply()
-        orig = getattr(ms, "check_stream", None)
-        if orig is not None and asyncio.iscoroutinefunction(orig):
-            async def _patched():
-                r = await orig()
-                try:
-                    ok = _apply()
-                    if not close and not getattr(_flash_media, "_logged", False):
-                        _flash_media._logged = True
-                        print(f"[cam] double: {'تم تفعيل الفتح المزدوج' if ok else 'النسخة ما تدعمه، يشتغل كام وحدة'}")
-                except Exception as ex:
-                    print(f"[cam] double: فشل {type(ex).__name__}: {ex}")
-                return r
-            ms.check_stream = _patched
-        elif not close and not applied and not getattr(_flash_media, "_logged", False):
-            _flash_media._logged = True
-            print("[cam] double: النسخة ما تدعمه، يشتغل كام وحدة")
-    except Exception as ex:
-        print(f"[cam] double: فشل {type(ex).__name__}: {ex}")
-    return ms
 
 def flash_image_rows(uid, origin):
     has = flash_image_path(uid) is not None
@@ -946,9 +901,9 @@ async def _cam_play(uid, aid, mode, silent_lock=False, already_on=False):
         if not get_active_stream(uid, aid):
             return None   # البث انتهى/اتوقف: لا نشغّل شي عشان ما يرجع للاتصال
         kwargs = {"audio_parameters": AudioQuality.STUDIO}
-        if mode_kind in ("off", "close2"):
+        if mode_kind == "off":
             kwargs["video_flags"] = MediaStream.Flags.IGNORE
-        elif mode_kind in ("flash", "flash2"):
+        elif mode_kind == "flash":
             kwargs["video_parameters"] = VideoQuality.SD_360p
         else:
             kwargs["video_parameters"] = VideoQuality.HD_720p
@@ -959,7 +914,7 @@ async def _cam_play(uid, aid, mode, silent_lock=False, already_on=False):
                 kw = dict(kwargs)
                 if use_off:
                     kw["ffmpeg_parameters"] = f"-ss {off:.3f}"
-                await call.play(chat_id, _flash_media(path, close=(mode_kind == "close2"), **kw) if mode_kind in ("flash2", "close2") else MediaStream(path, **kw))
+                await call.play(chat_id, MediaStream(path, **kw))
                 return None
             except Exception as ex:
                 last = ex
@@ -977,8 +932,7 @@ async def _cam_play(uid, aid, mode, silent_lock=False, already_on=False):
             skip_on = already_on   # الحساب توه صاعد بكام الفلاش، فنبدأ بالإغلاق بدون إعادة تشغيل
 
             async def set_cams(open_):
-                """دالة واحدة: تفتح/تغلق الكام العادية والمزدوجة معاً."""
-                return await _play(asset, "flash2" if open_ else "close2")
+                return await _play(asset, "flash" if open_ else "off")
 
             fails = 0
             while True:  # تكرار تلقائي لين تضغط إيقاف أو ينتهي البث
@@ -1108,8 +1062,8 @@ async def flash_join_account(uid, aid, ch):
     last_err = None
     for attempt in range(2):
         try:
-            await call.play(chat_id, _flash_media(asset, audio_parameters=AudioQuality.STUDIO,
-                                                  video_parameters=VideoQuality.SD_360p))
+            await call.play(chat_id, MediaStream(asset, audio_parameters=AudioQuality.STUDIO,
+                                                 video_parameters=VideoQuality.SD_360p))
             set_active_stream(uid, aid, chat_id, title, vid["id"])
             schedule_auto_leave(uid, aid, call, chat_id, get_video_duration(vid["file_path"]))
             cam_state[(uid, aid)] = True
