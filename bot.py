@@ -1055,18 +1055,22 @@ async def flash_join_account(uid, aid, ch):
             return False, f"تعذر الانضمام للمجموعة: {type(join_err).__name__}"
         return False, "الحساب ليس عضواً في المجموعة"
 
-    asset = await asset_task
-    if not asset:
-        return False, "فشل تجهيز ملف الكام"
+    # نفس طريقة الصعود المضمونة بالتشغيل العادي (الملف الأصلي بنفس الإعدادات)، بس بدون بوابة تزامن وبدون انتظار
+    is_audio = vid.get("media_type") == "audio"
+    stream_kwargs = {"audio_parameters": AudioQuality.STUDIO}
+    if is_audio:
+        stream_kwargs["video_flags"] = MediaStream.Flags.IGNORE
+    else:
+        stream_kwargs["video_parameters"] = VideoQuality.HD_720p
+    stream_media = MediaStream(vid["file_path"], **stream_kwargs)
 
     last_err = None
     for attempt in range(2):
         try:
-            await call.play(chat_id, MediaStream(asset, audio_parameters=AudioQuality.STUDIO,
-                                                 video_parameters=VideoQuality.SD_360p))
+            await call.play(chat_id, stream_media)
             set_active_stream(uid, aid, chat_id, title, vid["id"])
             schedule_auto_leave(uid, aid, call, chat_id, get_video_duration(vid["file_path"]))
-            cam_state[(uid, aid)] = True
+            cam_state[(uid, aid)] = not is_audio
             return True, "تم"
         except Exception as ex:
             last_err = ex
@@ -2737,7 +2741,7 @@ async def _flash_join_and_run(e, uid, acc, ch):
         await hard_stop_account(uid, aid, get_state(uid)["calls"].get(aid), s_["chat_id"] if s_ else ch["chat_id"])
         return
     asyncio.create_task(_refresh_stream_menu(e, uid))
-    ok2, msg2 = await flash_camera(uid, aid, already_on=True)   # يبدأ بإغلاق ثم فتح... تكرار
+    ok2, msg2 = await flash_camera(uid, aid)   # أول ما يصعد: فتح/إغلاق متكرر مباشرة
     if not ok2:
         try:
             await e.respond(f"❌ {name}: فشل الفلاش ({msg2})")
